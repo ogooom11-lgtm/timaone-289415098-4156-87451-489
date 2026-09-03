@@ -10,6 +10,7 @@ import '../../../core/utils/currency_denoms.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../widgets/app_ui.dart';
+import '../../widgets/clipboard_words_panel.dart';
 import '../../widgets/denom_validator_dialog.dart';
 
 class AddDeliveryPage extends StatefulWidget {
@@ -45,6 +46,13 @@ class _AddDeliveryPageState extends State<AddDeliveryPage> {
 
   int? _selectedCurrencyId;
   List<Currency> _currencies = [];
+
+  /// هل يجري سحب كلمة من لوحة الحافظة الآن؟ (لإضاءة الحقول المستهدفة)
+  bool _dragging = false;
+
+  /// مفتاح ثابت للوحة الحافظة حتى لا يضيع نصّها عند تغيّر عرض النافذة
+  /// بين التخطيطين (جانبي/علوي).
+  final _clipboardKey = GlobalKey();
 
   bool get _isEditMode => widget.transaction != null;
 
@@ -356,6 +364,142 @@ class _AddDeliveryPageState extends State<AddDeliveryPage> {
     }
   }
 
+  // ---------------------------------------------------------------------
+  // لوحة الحافظة: استقبال الكلمات المسحوبة/المرسلة في الحقول
+  // ---------------------------------------------------------------------
+
+  Currency? _matchCurrency(String text) {
+    if (_currencies.isEmpty) return null;
+    final t = text.trim();
+    if (t.isEmpty) return null;
+    final upper = t.toUpperCase();
+    for (final c in _currencies) {
+      if (upper.contains(c.code.toUpperCase())) return c;
+    }
+    final lower = t.toLowerCase();
+    for (final c in _currencies) {
+      final name = CurrencyDenoms.displayName(c).toLowerCase();
+      if (name.isNotEmpty && lower.contains(name)) return c;
+      final aliases = _currencyAliases[c.code.toUpperCase()] ?? const [];
+      for (final a in aliases) {
+        if (lower.contains(a)) return c;
+      }
+    }
+    return null;
+  }
+
+  static const Map<String, List<String>> _currencyAliases = {
+    'USD': ['دولار', 'دولار امريكي', 'دولار أمريكي', r'$', 'usd'],
+    'EUR': ['يورو', '€', 'eur'],
+    'TRY': ['ليرة تركية', 'تركي', '₺', 'tl', 'try'],
+    'SYP': ['ليرة سورية', 'سوري', 'ل.س', 'syp'],
+    'SAR': ['ريال سعودي', 'سعودي', 'ر.س', 'sar'],
+    'JOD': ['دينار اردني', 'دينار أردني', 'اردني', 'أردني', 'د.أ', 'jod'],
+    'QAR': ['ريال قطري', 'قطري', 'ر.ق', 'qar'],
+    'AED': ['درهم', 'اماراتي', 'إماراتي', 'د.إ', 'aed'],
+    'KWD': ['دينار كويتي', 'كويتي', 'د.ك', 'kwd'],
+    'GBP': ['جنيه استرليني', 'استرليني', 'إسترليني', '£', 'gbp'],
+    'IQD': ['دينار عراقي', 'عراقي', 'د.ع', 'iqd'],
+    'EGP': ['جنيه مصري', 'مصري', 'ج.م', 'egp'],
+    'LBP': ['ليرة لبنانية', 'لبناني', 'ل.ل', 'lbp'],
+    'BHD': ['دينار بحريني', 'بحريني', 'د.ب', 'bhd'],
+    'OMR': ['ريال عماني', 'عماني', 'ر.ع', 'omr'],
+  };
+
+  void _toast(String msg) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(msg),
+          duration: const Duration(milliseconds: 1400),
+          behavior: SnackBarBehavior.floating,
+          width: 360,
+        ),
+      );
+  }
+
+  void _applyAmount(TextEditingController controller, String text,
+      {required bool second}) {
+    final number = ClipboardText.extractNumber(text);
+    if (number == null) {
+      _toast('لا يوجد رقم في النص المحدد');
+      return;
+    }
+    controller.text = number;
+    // لو رافق الرقم رمز/اسم عملة نختارها تلقائياً.
+    final currency = _matchCurrency(ClipboardText.nonNumericPart(text));
+    if (currency != null) {
+      setState(() {
+        if (second) {
+          _selectedCurrencyId2 = currency.id;
+        } else {
+          _selectedCurrencyId = currency.id;
+        }
+      });
+    }
+  }
+
+  void _applyFromClipboard(PasteTarget target, String text) {
+    final value = text.trim();
+    if (value.isEmpty) return;
+
+    switch (target) {
+      case PasteTarget.beneficiary:
+        final name = ClipboardText.sanitizeName(value);
+        if (name.isEmpty) {
+          _toast('النص لا يحتوي على أحرف صالحة للاسم');
+          return;
+        }
+        final existing = _beneficiaryController.text.trim();
+        _beneficiaryController.text =
+            existing.isEmpty ? name : '$existing $name';
+        break;
+
+      case PasteTarget.amount:
+        _applyAmount(_amountController, value, second: false);
+        break;
+
+      case PasteTarget.amount2:
+        if (!_showSecondAmount) setState(() => _showSecondAmount = true);
+        _applyAmount(_amount2Controller, value, second: true);
+        break;
+
+      case PasteTarget.currency:
+      case PasteTarget.currency2:
+        final currency = _matchCurrency(value);
+        if (currency == null) {
+          _toast('لم أتعرف على عملة في "$value"');
+          return;
+        }
+        setState(() {
+          if (target == PasteTarget.currency2) {
+            _selectedCurrencyId2 = currency.id;
+          } else {
+            _selectedCurrencyId = currency.id;
+          }
+        });
+        break;
+
+      case PasteTarget.note:
+        final existing = _noteController.text;
+        _noteController.text = existing.trim().isEmpty
+            ? value
+            : '${existing.trimRight()} $value';
+        break;
+    }
+  }
+
+  /// يغلّف حقلاً بمنطقة إفلات تستقبل كلمات الحافظة.
+  Widget _drop(PasteTarget target, Widget child, {Color? color}) {
+    return TimaDropField(
+      dragging: _dragging,
+      color: color,
+      onDrop: (text) => _applyFromClipboard(target, text),
+      child: child,
+    );
+  }
+
   @override
   void dispose() {
     _dateController.dispose();
@@ -368,8 +512,6 @@ class _AddDeliveryPageState extends State<AddDeliveryPage> {
 
   @override
   Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-
     return Scaffold(
       backgroundColor: Colors.transparent,
       appBar: timaMaybeAppBar(
@@ -380,17 +522,78 @@ class _AddDeliveryPageState extends State<AddDeliveryPage> {
       ),
       body: TimaPageBackground(
         child: Form(
-        key: _formKey,
-        child: Scrollbar(
-          child: ListView(
-          padding: const EdgeInsets.symmetric(
-            horizontal: AppDims.pagePadding,
-            vertical: 18,
+          key: _formKey,
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              // على الشاشات العريضة: النموذج يميناً ولوحة الحافظة يساراً
+              // بارتفاع ثابت (تبقى ظاهرة أثناء تمرير النموذج).
+              final wide = constraints.maxWidth >= 1040;
+
+              final form = Scrollbar(
+                child: ListView(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: AppDims.pagePadding,
+                    vertical: 18,
+                  ),
+                  children: [
+                    if (!wide) ...[
+                      TimaContentWidth(
+                        maxWidth: 880,
+                        child: ClipboardWordsPanel(
+                          key: _clipboardKey,
+                          onSend: _applyFromClipboard,
+                          onDraggingChanged: (v) =>
+                              setState(() => _dragging = v),
+                          showSecondAmount: _showSecondAmount,
+                          wordsMaxHeight: 180,
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                    ],
+                    TimaContentWidth(
+                      maxWidth: 880,
+                      child: _buildFormBody(context),
+                    ),
+                  ],
+                ),
+              );
+
+              if (!wide) return form;
+
+              return Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Expanded(child: form),
+                  Padding(
+                    padding: const EdgeInsetsDirectional.only(
+                      end: AppDims.pagePadding,
+                      top: 18,
+                      bottom: 18,
+                    ),
+                    child: SizedBox(
+                      width: 340,
+                      child: ClipboardWordsPanel(
+                        key: _clipboardKey,
+                        onSend: _applyFromClipboard,
+                        onDraggingChanged: (v) =>
+                            setState(() => _dragging = v),
+                        showSecondAmount: _showSecondAmount,
+                      ),
+                    ),
+                  ),
+                ],
+              );
+            },
           ),
-          children: [
-            TimaContentWidth(
-              maxWidth: 880,
-              child: Column(
+        ),
+      ),
+    );
+  }
+
+  Widget _buildFormBody(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    return Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
             const TimaHeaderPanel(
@@ -463,7 +666,9 @@ class _AddDeliveryPageState extends State<AddDeliveryPage> {
                     const SizedBox(height: 16),
 
                     // Beneficiary Name
-                    TextFormField(
+                    _drop(
+                      PasteTarget.beneficiary,
+                      TextFormField(
                       controller: _beneficiaryController,
                       inputFormatters: [
                         FilteringTextInputFormatter.allow(
@@ -483,6 +688,7 @@ class _AddDeliveryPageState extends State<AddDeliveryPage> {
                           value == null || value.trim().isEmpty
                           ? "هذا الحقل مطلوب"
                           : null,
+                      ),
                     ),
                     const SizedBox(height: 16),
 
@@ -501,7 +707,10 @@ class _AddDeliveryPageState extends State<AddDeliveryPage> {
                       children: [
                         Expanded(
                           flex: 2,
-                          child: TextFormField(
+                          child: _drop(
+                            PasteTarget.amount,
+                            color: AppColors.brandGoldDark,
+                            TextFormField(
                             controller: _amountController,
                             keyboardType: const TextInputType.numberWithOptions(
                               decimal: true,
@@ -524,11 +733,14 @@ class _AddDeliveryPageState extends State<AddDeliveryPage> {
                                     double.tryParse(value) == null
                                 ? "رقم صالح مطلوب"
                                 : null,
+                            ),
                           ),
                         ),
                         const SizedBox(width: 10),
                         Expanded(
-                          child: DropdownButtonFormField<int>(
+                          child: _drop(
+                            PasteTarget.currency,
+                            DropdownButtonFormField<int>(
                             value: _selectedCurrencyId,
                             decoration: const InputDecoration(
                               labelText: "العملة 1",
@@ -554,6 +766,7 @@ class _AddDeliveryPageState extends State<AddDeliveryPage> {
                                 setState(() => _selectedCurrencyId = value),
                             validator: (value) =>
                                 value == null ? "مطلوب" : null,
+                            ),
                           ),
                         ),
                       ],
@@ -599,7 +812,10 @@ class _AddDeliveryPageState extends State<AddDeliveryPage> {
                         children: [
                           Expanded(
                             flex: 2,
-                            child: TextFormField(
+                            child: _drop(
+                              PasteTarget.amount2,
+                              color: AppColors.brandGoldDark,
+                              TextFormField(
                               controller: _amount2Controller,
                               keyboardType:
                                   const TextInputType.numberWithOptions(
@@ -628,11 +844,14 @@ class _AddDeliveryPageState extends State<AddDeliveryPage> {
                                 }
                                 return null;
                               },
+                              ),
                             ),
                           ),
                           const SizedBox(width: 10),
                           Expanded(
-                            child: DropdownButtonFormField<int>(
+                            child: _drop(
+                              PasteTarget.currency2,
+                              DropdownButtonFormField<int>(
                               value: _selectedCurrencyId2,
                               decoration: const InputDecoration(
                                 labelText: "العملة 2",
@@ -660,6 +879,7 @@ class _AddDeliveryPageState extends State<AddDeliveryPage> {
                                   _showSecondAmount && value == null
                                   ? "مطلوب"
                                   : null,
+                              ),
                             ),
                           ),
                         ],
@@ -669,7 +889,9 @@ class _AddDeliveryPageState extends State<AddDeliveryPage> {
                     const SizedBox(height: 16),
 
                     // Notes
-                    TextFormField(
+                    _drop(
+                      PasteTarget.note,
+                      TextFormField(
                       controller: _noteController,
                       maxLines: 3,
                       decoration: const InputDecoration(
@@ -679,6 +901,7 @@ class _AddDeliveryPageState extends State<AddDeliveryPage> {
                           color: AppColors.brandGold,
                         ),
                         alignLabelWithHint: true,
+                      ),
                       ),
                     ),
                   ],
@@ -780,13 +1003,6 @@ class _AddDeliveryPageState extends State<AddDeliveryPage> {
                 ],
               ),
                 ],
-              ),
-            ),
-          ],
-          ),
-        ),
-      ),
-      ),
     );
   }
 }
