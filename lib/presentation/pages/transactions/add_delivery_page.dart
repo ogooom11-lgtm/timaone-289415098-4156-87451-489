@@ -6,11 +6,16 @@ import 'package:intl/intl.dart';
 import '../../../core/printing/delivery_receipt.dart';
 import '../../../core/services/app_sound.dart';
 import '../../../core/storage/app_database.dart';
+import '../../../core/utils/clipboard_text.dart';
 import '../../../core/utils/currency_denoms.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../widgets/app_ui.dart';
+import '../../widgets/clipboard_words_panel.dart';
 import '../../widgets/denom_validator_dialog.dart';
+
+/// أدنى عرض يُعرض عنده النموذج ولوحة الحافظة جنباً إلى جنب.
+const double _kSplitBreakpoint = 1000;
 
 class AddDeliveryPage extends StatefulWidget {
   final AppDatabase db;
@@ -45,6 +50,11 @@ class _AddDeliveryPageState extends State<AddDeliveryPage> {
 
   int? _selectedCurrencyId;
   List<Currency> _currencies = [];
+
+  /// النص المسحوب حالياً من لوحة الحافظة — يُبرز الحقول التي تقبله.
+  final ValueNotifier<String?> _dragging = ValueNotifier<String?>(null);
+  final ScrollController _formScroll = ScrollController();
+  bool _validatedOnce = false;
 
   bool get _isEditMode => widget.transaction != null;
 
@@ -136,6 +146,7 @@ class _AddDeliveryPageState extends State<AddDeliveryPage> {
 
     if (!_formKey.currentState!.validate() || _selectedCurrencyId == null) {
       _formKey.currentState?.validate();
+      _validatedOnce = true;
       return;
     }
 
@@ -363,13 +374,141 @@ class _AddDeliveryPageState extends State<AddDeliveryPage> {
     _amountController.dispose();
     _amount2Controller.dispose();
     _noteController.dispose();
+    _dragging.dispose();
+    _formScroll.dispose();
     super.dispose();
   }
 
+  // -------------------------------------------------------------------
+  // لوحة نص الحافظة — تعبئة الحقول بالسحب والإفلات
+  // -------------------------------------------------------------------
+
+  /// إن كان النص يحمل عملة معروفة وموجودة في الصندوق، تُختار تلقائياً.
+  int? _currencyIdFromText(String text) {
+    final code = ClipboardText.detectCurrencyCode(
+      text,
+      knownCodes: _currencies.map((c) => c.code),
+    );
+    if (code == null) return null;
+    for (final currency in _currencies) {
+      if (currency.code.toUpperCase() == code.toUpperCase()) return currency.id;
+    }
+    return null;
+  }
+
+  /// بعد أول محاولة حفظ فاشلة تُعاد المصادقة عقب كل إفلات، حتى تختفي
+  /// رسائل «هذا الحقل مطلوب» فور تعبئة الحقل من اللوحة.
+  void _afterDrop() {
+    if (_validatedOnce) _formKey.currentState?.validate();
+  }
+
+  bool _dropBeneficiary(String text) {
+    final cleaned = ClipboardText.cleanForName(text);
+    if (cleaned.isEmpty) return false;
+    final current = _beneficiaryController.text.trim();
+    // الكلمة موجودة أصلاً في الاسم؟ لا نكرّرها.
+    if (current.split(' ').contains(cleaned)) return true;
+    // إفلات كلمة ثانية يُكمل الاسم بدل استبداله (اسم من عدة كلمات).
+    final next = current.isEmpty ? cleaned : '$current $cleaned';
+    _beneficiaryController
+      ..text = next
+      ..selection = TextSelection.collapsed(offset: next.length);
+    _afterDrop();
+    return true;
+  }
+
+  bool _dropAmount(String text, {required bool second}) {
+    final number = ClipboardText.extractNumber(text);
+    if (number == null) return false;
+    final controller = second ? _amount2Controller : _amountController;
+    controller
+      ..text = number
+      ..selection = TextSelection.collapsed(offset: number.length);
+
+    // «500 دولار» تعبّئ المبلغ وتختار العملة معاً.
+    final currencyId = _currencyIdFromText(text);
+    setState(() {
+      if (second) {
+        _showSecondAmount = true;
+        if (currencyId != null) _selectedCurrencyId2 = currencyId;
+      } else if (currencyId != null) {
+        _selectedCurrencyId = currencyId;
+      }
+    });
+    _afterDrop();
+    return true;
+  }
+
+  bool _dropCurrency(String text, {required bool second}) {
+    final currencyId = _currencyIdFromText(text);
+    if (currencyId == null) return false;
+    setState(() {
+      if (second) {
+        _showSecondAmount = true;
+        _selectedCurrencyId2 = currencyId;
+      } else {
+        _selectedCurrencyId = currencyId;
+      }
+    });
+    _afterDrop();
+    return true;
+  }
+
+  bool _dropNote(String text) {
+    final cleaned = text.trim();
+    if (cleaned.isEmpty) return false;
+    final current = _noteController.text.trimRight();
+    final next = current.isEmpty ? cleaned : '$current $cleaned';
+    _noteController
+      ..text = next
+      ..selection = TextSelection.collapsed(offset: next.length);
+    return true;
+  }
+
+  /// نقر مزدوج على كلمة في اللوحة: تعبئة ذكية حسب نوعها.
+  /// رقم → المبلغ الأول، عملة → العملة الأولى، وغير ذلك → يُضاف إلى الاسم.
+  /// (المبلغ والعملة الثانيان يُعبّآن بالسحب فقط حتى لا تحدث مفاجآت.)
+  bool _quickAssign(String text) {
+    if (ClipboardText.extractNumber(text) != null) {
+      return _dropAmount(text, second: false);
+    }
+    final code = ClipboardText.detectCurrencyCode(
+      text,
+      knownCodes: _currencies.map((c) => c.code),
+    );
+    if (code != null) {
+      if (_dropCurrency(text, second: false)) return true;
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(content: Text('العملة $code غير مضافة في الصندوق.')),
+        );
+      return false;
+    }
+    return _dropBeneficiary(text);
+  }
+
+  /// نفس أهداف الإفلات كأزرار سريعة في شريط التحديد داخل اللوحة.
+  List<ClipboardAssignTarget> get _assignTargets => [
+    ClipboardAssignTarget(
+      label: 'الاسم',
+      icon: Icons.person_outline_rounded,
+      onAssign: _dropBeneficiary,
+    ),
+    ClipboardAssignTarget(
+      label: 'المبلغ',
+      icon: Icons.payments_outlined,
+      onAssign: (text) => _dropAmount(text, second: false),
+    ),
+    ClipboardAssignTarget(
+      label: 'الملاحظات',
+      icon: Icons.note_alt_outlined,
+      onAssign: _dropNote,
+    ),
+  ];
+
   @override
   Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-
     return Scaffold(
       backgroundColor: Colors.transparent,
       appBar: timaMaybeAppBar(
@@ -379,159 +518,359 @@ class _AddDeliveryPageState extends State<AddDeliveryPage> {
             : "تسجيل حركة تسليم / يوزر",
       ),
       body: TimaPageBackground(
-        child: Form(
-        key: _formKey,
-        child: Scrollbar(
-          child: ListView(
-          padding: const EdgeInsets.symmetric(
-            horizontal: AppDims.pagePadding,
-            vertical: 18,
-          ),
-          children: [
-            TimaContentWidth(
-              maxWidth: 880,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-            const TimaHeaderPanel(
-              icon: Icons.outbox_rounded,
-              title: "أمانة تسليم نقدية أو حركة يوزر",
-              subtitle:
-                  "حركة التسليم تسجل بسالب وتدخل في المعلقة، بينما حركة يوزر تُسلَّم فوراً مع جرد فئاتها.",
+        child: ClipboardDragScope(
+          notifier: _dragging,
+          child: Form(
+            key: _formKey,
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                // اللوحة الجانبية تظهر بجانب النموذج عند توفر العرض،
+                // وفوقه على الشاشات الضيقة.
+                final sideBySide = constraints.maxWidth >= _kSplitBreakpoint;
+                final panel = SizedBox(
+                  width: sideBySide ? AppDims.sidePanelWidth : null,
+                  height: sideBySide ? null : 280,
+                  child: ClipboardWordsPanel(
+                    targets: _assignTargets,
+                    onQuickAssign: _quickAssign,
+                  ),
+                );
+
+                if (sideBySide) {
+                  return Row(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Expanded(child: _buildFormScroller()),
+                      Padding(
+                        padding: const EdgeInsetsDirectional.only(
+                          end: AppDims.pagePadding,
+                          top: 18,
+                          bottom: 18,
+                        ),
+                        child: panel,
+                      ),
+                    ],
+                  );
+                }
+
+                return _buildFormScroller(leading: panel);
+              },
             ),
-            const SizedBox(height: 20),
+          ),
+        ),
+      ),
+    );
+  }
 
-            // Select Delivery or User movement type
-            if (!_isEditMode) ...[
-              const Text(
-                "نوع الحركة المالية المطلوب تسجيلها:",
-                style: TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.bold,
-                  color: AppColors.neutral500,
-                ),
-              ),
-              const SizedBox(height: 8),
-              SegmentedButton<String>(
-                segments: const [
-                  ButtonSegment(
-                    value: "حركة تسليم",
-                    icon: Icon(Icons.hourglass_empty_rounded),
-                    label: Text("حركة تسليم (معلقة)"),
-                  ),
-                  ButtonSegment(
-                    value: "حركة يوزر",
-                    icon: Icon(Icons.check_circle_rounded),
-                    label: Text("حركة يوزر (مكتملة فوراً)"),
-                  ),
+  /// [leading] هي لوحة الحافظة في التخطيط الضيق — تُعرض فوق النموذج
+  /// حتى تبقى قريبة من حقلي الاسم والمبلغ.
+  Widget _buildFormScroller({Widget? leading}) {
+    return Scrollbar(
+      controller: _formScroll,
+      child: ListView(
+        controller: _formScroll,
+        padding: const EdgeInsets.symmetric(
+          horizontal: AppDims.pagePadding,
+          vertical: 18,
+        ),
+        children: [
+          TimaContentWidth(
+            maxWidth: 880,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (leading != null) ...[
+                  leading,
+                  const SizedBox(height: AppDims.sectionGap),
                 ],
-                selected: {_deliveryType},
-                onSelectionChanged: (value) {
-                  setState(() => _deliveryType = value.first);
-                },
-              ),
-              const SizedBox(height: 20),
-            ],
+                _buildFormBody(),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
-            // Input Fields Card
-            Card(
-              elevation: 0,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(AppDims.radius),
-                side: BorderSide(color: AppUi.border(context)),
+  Widget _buildFormBody() {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const TimaHeaderPanel(
+          icon: Icons.outbox_rounded,
+          title: "أمانة تسليم نقدية أو حركة يوزر",
+          subtitle:
+              "حركة التسليم تسجل بسالب وتدخل في المعلقة، بينما حركة يوزر تُسلَّم فوراً مع جرد فئاتها.",
+        ),
+        const SizedBox(height: 20),
+
+        // Select Delivery or User movement type
+        if (!_isEditMode) ...[
+          const Text(
+            "نوع الحركة المالية المطلوب تسجيلها:",
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.bold,
+              color: AppColors.neutral500,
+            ),
+          ),
+          const SizedBox(height: 8),
+          SegmentedButton<String>(
+            segments: const [
+              ButtonSegment(
+                value: "حركة تسليم",
+                icon: Icon(Icons.hourglass_empty_rounded),
+                label: Text("حركة تسليم (معلقة)"),
               ),
-              child: Padding(
-                padding: const EdgeInsets.all(20),
-                child: Column(
+              ButtonSegment(
+                value: "حركة يوزر",
+                icon: Icon(Icons.check_circle_rounded),
+                label: Text("حركة يوزر (مكتملة فوراً)"),
+              ),
+            ],
+            selected: {_deliveryType},
+            onSelectionChanged: (value) {
+              setState(() => _deliveryType = value.first);
+            },
+          ),
+          const SizedBox(height: 20),
+        ],
+
+        // Input Fields Card
+        Card(
+          elevation: 0,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(AppDims.radius),
+            side: BorderSide(color: AppUi.border(context)),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Date (Disabled)
+                TextFormField(
+                  controller: _dateController,
+                  enabled: false,
+                  decoration: InputDecoration(
+                    labelText: "تاريخ الحركة اليوم",
+                    prefixIcon: const Icon(
+                      Icons.calendar_today_rounded,
+                      color: AppColors.brandGold,
+                    ),
+                    fillColor: isDark
+                        ? AppColors.darkBackground
+                        : AppColors.neutral500.withValues(alpha: 0.04),
+                  ),
+                ),
+                const SizedBox(height: 16),
+
+                // Beneficiary Name
+                ClipboardDropTarget(
+                  hint: 'الاسم',
+                  onDrop: _dropBeneficiary,
+                  child: TextFormField(
+                    controller: _beneficiaryController,
+                    inputFormatters: [
+                      FilteringTextInputFormatter.allow(
+                        RegExp(r'[\u0600-\u06FFa-zA-Z0-9 ]'),
+                      ),
+                    ],
+                    decoration: InputDecoration(
+                      labelText: _deliveryType == "حركة تسليم"
+                          ? "اسم المستفيد بالكامل"
+                          : "اسم المستخدم (اليوزر)",
+                      prefixIcon: const Icon(
+                        Icons.person_outline_rounded,
+                        color: AppColors.brandGold,
+                      ),
+                    ),
+                    validator: (value) =>
+                        value == null || value.trim().isEmpty
+                        ? "هذا الحقل مطلوب"
+                        : null,
+                  ),
+                ),
+                const SizedBox(height: 16),
+
+                // Amount 1 and Currency 1 Row
+                const Text(
+                  "المبلغ الأول (الرئيسي):",
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                    color: AppColors.neutral500,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // Date (Disabled)
-                    TextFormField(
-                      controller: _dateController,
-                      enabled: false,
-                      decoration: InputDecoration(
-                        labelText: "تاريخ الحركة اليوم",
-                        prefixIcon: const Icon(
-                          Icons.calendar_today_rounded,
-                          color: AppColors.brandGold,
-                        ),
-                        fillColor: isDark
-                            ? AppColors.darkBackground
-                            : AppColors.neutral500.withValues(alpha: 0.04),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-
-                    // Beneficiary Name
-                    TextFormField(
-                      controller: _beneficiaryController,
-                      inputFormatters: [
-                        FilteringTextInputFormatter.allow(
-                          RegExp(r'[\u0600-\u06FFa-zA-Z0-9 ]'),
-                        ),
-                      ],
-                      decoration: InputDecoration(
-                        labelText: _deliveryType == "حركة تسليم"
-                            ? "اسم المستفيد بالكامل"
-                            : "اسم المستخدم (اليوزر)",
-                        prefixIcon: const Icon(
-                          Icons.person_outline_rounded,
-                          color: AppColors.brandGold,
-                        ),
-                      ),
-                      validator: (value) =>
-                          value == null || value.trim().isEmpty
-                          ? "هذا الحقل مطلوب"
-                          : null,
-                    ),
-                    const SizedBox(height: 16),
-
-                    // Amount 1 and Currency 1 Row
-                    const Text(
-                      "المبلغ الأول (الرئيسي):",
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.bold,
-                        color: AppColors.neutral500,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Expanded(
-                          flex: 2,
-                          child: TextFormField(
-                            controller: _amountController,
-                            keyboardType: const TextInputType.numberWithOptions(
-                              decimal: true,
+                    Expanded(
+                      flex: 2,
+                      child: ClipboardDropTarget(
+                        hint: 'المبلغ 1',
+                        canAccept: (text) =>
+                            ClipboardText.extractNumber(text) != null,
+                        rejectHint: 'لا يحتوي رقماً',
+                        onDrop: (text) => _dropAmount(text, second: false),
+                        child: TextFormField(
+                          controller: _amountController,
+                          keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true,
+                          ),
+                          inputFormatters: [
+                            FilteringTextInputFormatter.allow(
+                              RegExp(r'[0-9.]'),
                             ),
+                          ],
+                          decoration: const InputDecoration(
+                            labelText: "المبلغ 1",
+                            prefixIcon: Icon(
+                              Icons.payments_outlined,
+                              color: AppColors.brandGold,
+                            ),
+                          ),
+                          validator: (value) =>
+                              value == null ||
+                                  value.trim().isEmpty ||
+                                  double.tryParse(value) == null
+                              ? "رقم صالح مطلوب"
+                              : null,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: ClipboardDropTarget(
+                        hint: 'العملة 1',
+                        canAccept: (text) => _currencyIdFromText(text) != null,
+                        rejectHint: 'عملة غير معروفة',
+                        onDrop: (text) => _dropCurrency(text, second: false),
+                        child: DropdownButtonFormField<int>(
+                          value: _selectedCurrencyId,
+                          decoration: const InputDecoration(
+                            labelText: "العملة 1",
+                            contentPadding: EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 14,
+                            ),
+                          ),
+                          items: _currencies
+                              .map(
+                                (currency) => DropdownMenuItem(
+                                  value: currency.id,
+                                  child: Text(
+                                    currency.code,
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ),
+                              )
+                              .toList(),
+                          onChanged: (value) =>
+                              setState(() => _selectedCurrencyId = value),
+                          validator: (value) =>
+                              value == null ? "مطلوب" : null,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+
+                const SizedBox(height: 12),
+
+                // Switch to enable Second Amount/Currency (Optional)
+                Row(
+                  children: [
+                    Checkbox(
+                      value: _showSecondAmount,
+                      activeColor: AppColors.brandGold,
+                      onChanged: (val) {
+                        setState(() {
+                          _showSecondAmount = val ?? false;
+                        });
+                      },
+                    ),
+                    const Text(
+                      "دعم مبلغ ثانٍ وعملة ثانوية بالحركة (اختياري)",
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+
+                if (_showSecondAmount) ...[
+                  const SizedBox(height: 8),
+                  const Text(
+                    "المبلغ الثاني (الفرعي):",
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold,
+                      color: AppColors.neutral500,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                        flex: 2,
+                        child: ClipboardDropTarget(
+                          hint: 'المبلغ 2',
+                          canAccept: (text) =>
+                              ClipboardText.extractNumber(text) != null,
+                          rejectHint: 'لا يحتوي رقماً',
+                          onDrop: (text) => _dropAmount(text, second: true),
+                          child: TextFormField(
+                            controller: _amount2Controller,
+                            keyboardType:
+                                const TextInputType.numberWithOptions(
+                                  decimal: true,
+                                ),
                             inputFormatters: [
                               FilteringTextInputFormatter.allow(
                                 RegExp(r'[0-9.]'),
                               ),
                             ],
                             decoration: const InputDecoration(
-                              labelText: "المبلغ 1",
+                              labelText: "المبلغ 2 (مطلوب عند التفعيل)",
                               prefixIcon: Icon(
                                 Icons.payments_outlined,
-                                color: AppColors.brandGold,
+                                color: AppColors.brandGoldDark,
                               ),
                             ),
-                            validator: (value) =>
-                                value == null ||
-                                    value.trim().isEmpty ||
-                                    double.tryParse(value) == null
-                                ? "رقم صالح مطلوب"
-                                : null,
+                            validator: (value) {
+                              if (_showSecondAmount) {
+                                if (value == null || value.trim().isEmpty) {
+                                  return "مطلوب عند تفعيل المبلغ الثاني";
+                                }
+                                if (double.tryParse(value) == null) {
+                                  return "أدخل رقماً صالحاً";
+                                }
+                              }
+                              return null;
+                            },
                           ),
                         ),
-                        const SizedBox(width: 10),
-                        Expanded(
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: ClipboardDropTarget(
+                          hint: 'العملة 2',
+                          canAccept: (text) =>
+                              _currencyIdFromText(text) != null,
+                          rejectHint: 'عملة غير معروفة',
+                          onDrop: (text) => _dropCurrency(text, second: true),
                           child: DropdownButtonFormField<int>(
-                            value: _selectedCurrencyId,
+                            value: _selectedCurrencyId2,
                             decoration: const InputDecoration(
-                              labelText: "العملة 1",
+                              labelText: "العملة 2",
                               contentPadding: EdgeInsets.symmetric(
                                 horizontal: 10,
                                 vertical: 14,
@@ -551,144 +890,82 @@ class _AddDeliveryPageState extends State<AddDeliveryPage> {
                                 )
                                 .toList(),
                             onChanged: (value) =>
-                                setState(() => _selectedCurrencyId = value),
+                                setState(() => _selectedCurrencyId2 = value),
                             validator: (value) =>
-                                value == null ? "مطلوب" : null,
+                                _showSecondAmount && value == null
+                                ? "مطلوب"
+                                : null,
                           ),
                         ),
-                      ],
-                    ),
-
-                    const SizedBox(height: 12),
-
-                    // Switch to enable Second Amount/Currency (Optional)
-                    Row(
-                      children: [
-                        Checkbox(
-                          value: _showSecondAmount,
-                          activeColor: AppColors.brandGold,
-                          onChanged: (val) {
-                            setState(() {
-                              _showSecondAmount = val ?? false;
-                            });
-                          },
-                        ),
-                        const Text(
-                          "دعم مبلغ ثانٍ وعملة ثانوية بالحركة (اختياري)",
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            fontSize: 12,
-                          ),
-                        ),
-                      ],
-                    ),
-
-                    if (_showSecondAmount) ...[
-                      const SizedBox(height: 8),
-                      const Text(
-                        "المبلغ الثاني (الفرعي):",
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.bold,
-                          color: AppColors.neutral500,
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Expanded(
-                            flex: 2,
-                            child: TextFormField(
-                              controller: _amount2Controller,
-                              keyboardType:
-                                  const TextInputType.numberWithOptions(
-                                    decimal: true,
-                                  ),
-                              inputFormatters: [
-                                FilteringTextInputFormatter.allow(
-                                  RegExp(r'[0-9.]'),
-                                ),
-                              ],
-                              decoration: const InputDecoration(
-                                labelText: "المبلغ 2 (مطلوب عند التفعيل)",
-                                prefixIcon: Icon(
-                                  Icons.payments_outlined,
-                                  color: AppColors.brandGoldDark,
-                                ),
-                              ),
-                              validator: (value) {
-                                if (_showSecondAmount) {
-                                  if (value == null || value.trim().isEmpty) {
-                                    return "مطلوب عند تفعيل المبلغ الثاني";
-                                  }
-                                  if (double.tryParse(value) == null) {
-                                    return "أدخل رقماً صالحاً";
-                                  }
-                                }
-                                return null;
-                              },
-                            ),
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: DropdownButtonFormField<int>(
-                              value: _selectedCurrencyId2,
-                              decoration: const InputDecoration(
-                                labelText: "العملة 2",
-                                contentPadding: EdgeInsets.symmetric(
-                                  horizontal: 10,
-                                  vertical: 14,
-                                ),
-                              ),
-                              items: _currencies
-                                  .map(
-                                    (currency) => DropdownMenuItem(
-                                      value: currency.id,
-                                      child: Text(
-                                        currency.code,
-                                        style: const TextStyle(
-                                          fontWeight: FontWeight.bold,
-                                        ),
-                                      ),
-                                    ),
-                                  )
-                                  .toList(),
-                              onChanged: (value) =>
-                                  setState(() => _selectedCurrencyId2 = value),
-                              validator: (value) =>
-                                  _showSecondAmount && value == null
-                                  ? "مطلوب"
-                                  : null,
-                            ),
-                          ),
-                        ],
                       ),
                     ],
+                  ),
+                ],
 
-                    const SizedBox(height: 16),
+                const SizedBox(height: 16),
 
-                    // Notes
-                    TextFormField(
-                      controller: _noteController,
-                      maxLines: 3,
-                      decoration: const InputDecoration(
-                        labelText: "ملاحظات وتفاصيل الحركة",
-                        prefixIcon: Icon(
-                          Icons.note_alt_outlined,
-                          color: AppColors.brandGold,
-                        ),
-                        alignLabelWithHint: true,
+                // Notes
+                ClipboardDropTarget(
+                  hint: 'الملاحظات',
+                  onDrop: _dropNote,
+                  child: TextFormField(
+                    controller: _noteController,
+                    maxLines: 3,
+                    decoration: const InputDecoration(
+                      labelText: "ملاحظات وتفاصيل الحركة",
+                      prefixIcon: Icon(
+                        Icons.note_alt_outlined,
+                        color: AppColors.brandGold,
                       ),
+                      alignLabelWithHint: true,
                     ),
-                  ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 24),
+
+        // Action Buttons
+        if (_isEditMode)
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(AppDims.radiusSm),
+                    ),
+                  ),
+                  onPressed: () => Navigator.pop(context),
+                  icon: const Icon(Icons.close_rounded),
+                  label: const Text("إلغاء التعديل"),
                 ),
               ),
-            ),
-            const SizedBox(height: 24),
-
-            // Action Buttons
-            if (_isEditMode)
+              const SizedBox(width: 12),
+              Expanded(
+                child: FilledButton.icon(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: AppColors.brandGold,
+                    foregroundColor: AppColors.brandGreenDark,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(AppDims.radiusSm),
+                    ),
+                  ),
+                  onPressed: () => _save(),
+                  icon: const Icon(Icons.save_rounded),
+                  label: const Text(
+                    "حفظ وتأكيد التعديل",
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                ),
+              ),
+            ],
+          )
+        else
+          Column(
+            children: [
               Row(
                 children: [
                   Expanded(
@@ -700,93 +977,49 @@ class _AddDeliveryPageState extends State<AddDeliveryPage> {
                       ),
                       onPressed: () => Navigator.pop(context),
                       icon: const Icon(Icons.close_rounded),
-                      label: const Text("إلغاء التعديل"),
+                      label: const Text("إلغاء"),
                     ),
                   ),
-                  const SizedBox(width: 12),
+                  const SizedBox(width: 10),
                   Expanded(
                     child: FilledButton.icon(
                       style: FilledButton.styleFrom(
-                        backgroundColor: AppColors.brandGold,
-                        foregroundColor: AppColors.brandGreenDark,
+                        backgroundColor: AppColors.success,
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(AppDims.radiusSm),
                         ),
                       ),
-                      onPressed: () => _save(),
-                      icon: const Icon(Icons.save_rounded),
+                      onPressed: () => _save(stay: false),
+                      icon: const Icon(Icons.check_circle_rounded),
                       label: const Text(
-                        "حفظ وتأكيد التعديل",
-                        style: TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                    ),
-                  ),
-                ],
-              )
-            else
-              Column(
-                children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: OutlinedButton.icon(
-                          style: OutlinedButton.styleFrom(
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(AppDims.radiusSm),
-                            ),
-                          ),
-                          onPressed: () => Navigator.pop(context),
-                          icon: const Icon(Icons.close_rounded),
-                          label: const Text("إلغاء"),
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: FilledButton.icon(
-                          style: FilledButton.styleFrom(
-                            backgroundColor: AppColors.success,
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(AppDims.radiusSm),
-                            ),
-                          ),
-                          onPressed: () => _save(stay: false),
-                          icon: const Icon(Icons.check_circle_rounded),
-                          label: const Text(
-                            "حفظ وإغلاق",
-                            style: TextStyle(fontWeight: FontWeight.bold),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  SizedBox(
-                    width: double.infinity,
-                    child: FilledButton.icon(
-                      style: FilledButton.styleFrom(
-                        backgroundColor: AppColors.brandGreen,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(AppDims.radiusSm),
-                        ),
-                      ),
-                      onPressed: () => _save(stay: true),
-                      icon: const Icon(Icons.add_circle_outline_rounded),
-                      label: const Text(
-                        "حفظ الحركة وتجهيز حركة جديدة",
+                        "حفظ وإغلاق",
                         style: TextStyle(fontWeight: FontWeight.bold),
                       ),
                     ),
                   ),
                 ],
               ),
-                ],
+              const SizedBox(height: 12),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: AppColors.brandGreen,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(AppDims.radiusSm),
+                    ),
+                  ),
+                  onPressed: () => _save(stay: true),
+                  icon: const Icon(Icons.add_circle_outline_rounded),
+                  label: const Text(
+                    "حفظ الحركة وتجهيز حركة جديدة",
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                ),
               ),
-            ),
-          ],
+            ],
           ),
-        ),
-      ),
-      ),
+      ],
     );
   }
 }

@@ -35,6 +35,9 @@ class AppDims {
   /// أقصى عرض للمحتوى — يمنع تمدد النصوص على الشاشات العريضة.
   static const double contentMaxWidth = 1180;
 
+  /// عرض اللوحة الجانبية المساعدة (مثل لوحة نص الحافظة في نماذج الحركات).
+  static const double sidePanelWidth = 320;
+
   /// حشوة الصفحة الأفقية.
   static const double pagePadding = 20;
 
