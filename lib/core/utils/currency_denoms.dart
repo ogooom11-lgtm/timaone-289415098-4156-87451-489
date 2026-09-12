@@ -105,6 +105,107 @@ class CurrencyDenoms {
     return m?.group(1);
   }
 
+  /// أثر حركة قديمة على مخزون الأوراق: الفئات المسجّلة + اتجاهها.
+  ///
+  /// يُستخدم عند تعديل حركة سبق أن لامست المخزون، لعكس أثرها القديم
+  /// قبل تطبيق الفئات الجديدة، فيتحدّث الرصيد بالفرق الصحيح فقط.
+  class OldStockEffect {
+    final Map<double, int> counts;
+    final bool isInflow;
+    const OldStockEffect(this.counts, this.isInflow);
+  }
+
+  /// يجمع أزواج (رمز العملة ← الفئات) من أسطر مثل `[بادئة USD: 100x1]`.
+  static Map<String, Map<double, int>> _allCodeCounts(
+    String note,
+    String marker,
+  ) {
+    final re = RegExp(
+      RegExp.escape('[$marker') + r'\s*([^\]:]+):\s*([^\]]+)\]',
+    );
+    final out = <String, Map<double, int>>{};
+    for (final m in re.allMatches(note)) {
+      out[(m.group(1) ?? '').trim()] = parseCounts(m.group(2));
+    }
+    return out;
+  }
+
+  /// يحسب أثر حركة محفوظة على المخزون حسب نوعها وصيغة ملاحظتها.
+  static Map<int, OldStockEffect> oldStockEffects(
+    Transaction tx,
+    Map<int, Currency> currencies,
+  ) {
+    final out = <int, OldStockEffect>{};
+    final note = tx.note;
+    if (note == null || note.trim().isEmpty) return out;
+    Currency? byId(int? id) => id == null ? null : currencies[id];
+
+    if (tx.type.contains('تسليم') || tx.type == 'حركة يوزر') {
+      final c1 = byId(tx.currencyId);
+      final c2 = byId(tx.targetCurrencyId);
+      final d1 = parseCounts(extractDeliveredDenomsNote(note));
+      final d2 = parseCounts(extractDeliveredDenomsNote2(note));
+      if (c1 != null && d1.isNotEmpty) out[c1.id] = OldStockEffect(d1, false);
+      if (c2 != null && d2.isNotEmpty) out[c2.id] = OldStockEffect(d2, false);
+      return out;
+    }
+
+    if (tx.type == 'حركة تسوية' || tx.type.contains('صرف')) {
+      final fromCounts = _allCodeCounts(note, 'فئات المسلم لـ');
+      final toCounts = _allCodeCounts(note, 'فئات المستلم لـ');
+      final from = byId(tx.currencyId);
+      final to = byId(tx.targetCurrencyId);
+      if (from != null) {
+        final c = fromCounts[from.code] ??
+            (fromCounts.isNotEmpty ? fromCounts.values.first : const {});
+        if (c.isNotEmpty) out[from.id] = OldStockEffect(c, false);
+      }
+      if (to != null) {
+        final c = toCounts[to.code] ??
+            (toCounts.isNotEmpty ? toCounts.values.first : const {});
+        if (c.isNotEmpty) out[to.id] = OldStockEffect(c, true);
+      }
+      return out;
+    }
+
+    // استلام / مرسلة — فئات واردة.
+    final marker = tx.type.contains('مرسلة')
+        ? 'الفئات المستلمة للحوالة لـ'
+        : 'الفئات المستلمة لـ';
+    final codeCounts = _allCodeCounts(note, marker);
+    for (final id in [tx.currencyId, tx.targetCurrencyId]) {
+      final cur = byId(id);
+      if (cur == null) continue;
+      final exact = codeCounts[cur.code];
+      if (exact != null && exact.isNotEmpty) {
+        out[cur.id] = OldStockEffect(exact, true);
+      } else if (id == tx.currencyId && codeCounts.isNotEmpty) {
+        out[cur.id] = OldStockEffect(codeCounts.values.first, true);
+      }
+    }
+    return out;
+  }
+
+  /// يعكس أثر حركة قديمة على المخزون — يُستدعى قبل تطبيق تعديل عليها.
+  ///
+  /// حركة واردة تُخصم فئاتها القديمة، وحركة صادرة تُعاد فئاتها، فيصبح
+  /// صافي التغيير مساوياً للفرق بين القديم والجديد فقط.
+  static Future<void> reverseOldStock(
+    Transaction oldTx,
+    Map<int, Currency> currencies,
+  ) async {
+    final effects = oldStockEffects(oldTx, currencies);
+    for (final entry in effects.entries) {
+      final cur = currencies[entry.key];
+      if (cur == null || entry.value.counts.isEmpty) continue;
+      if (entry.value.isInflow) {
+        await deductStock(cur, entry.value.counts);
+      } else {
+        await addStock(cur, entry.value.counts);
+      }
+    }
+  }
+
   static double sumCounts(Map<double, int> counts) {
     var sum = 0.0;
     counts.forEach((denom, count) => sum += denom * count);

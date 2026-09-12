@@ -149,6 +149,13 @@ class _AddExchangePageState extends State<AddExchangePage> {
         "[فئات المسلم لـ ${currencyFrom.code}: ${_formatCounts(countsFrom)}]\n[فئات المستلم لـ ${currencyTo.code}: ${_formatCounts(countsTo)}]";
 
     // تحديث مخزون الأوراق: خصم الصادر + إضافة الوارد
+    // عكس أثر الفئات القديمة قبل تطبيق الجديدة (تعديل صحيح بالفرق).
+    if (_isEditMode) {
+      await CurrencyDenoms.reverseOldStock(
+        widget.transaction!,
+        {for (final c in _currencies) c.id: c},
+      );
+    }
     await CurrencyDenoms.deductStock(currencyFrom, countsFrom);
     await CurrencyDenoms.addStock(currencyTo, countsTo);
 

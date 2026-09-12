@@ -388,7 +388,7 @@ class DeliveryReceiptService {
     }
 
     // --- جدول تفصيل الفئات ---
-    pw.Widget denomsTable(Map<double, int> counts, String code) {
+    pw.Widget denomsTable(Map<double, int> counts, String unit) {
       final keys = counts.keys.toList()..sort((a, b) => b.compareTo(a));
       final rows = <pw.TableRow>[];
 
@@ -416,7 +416,7 @@ class DeliveryReceiptService {
         pw.TableRow(
           decoration: pw.BoxDecoration(color: PdfColor.fromInt(0xFFF1F1F1)),
           children: [
-            cell('الفئة ($code)', headStyle()),
+            cell('الفئة: $unit', headStyle()),
             cell('العدد', headStyle()),
             cell('القيمة', headStyle()),
           ],
@@ -475,7 +475,13 @@ class DeliveryReceiptService {
           horizontal: compact ? 6 : 8,
           vertical: compact ? 8 : 10,
         ),
-        theme: pw.ThemeData.withFont(base: font, bold: bold),
+        theme: pw.ThemeData.withFont(
+          base: font,
+          bold: bold,
+          // خط بديل للحروف اللاتينية والرموز التي لا يغطيها خط النسخ،
+          // فيظهر أي محرف ناقص بشكل سليم بدل المربع.
+          fontFallback: [pw.Font.helvetica()],
+        ),
         build: (context) {
           return pw.Directionality(
             textDirection: pw.TextDirection.rtl,
@@ -529,14 +535,23 @@ class DeliveryReceiptService {
                     hairline(),
                     sectionTitle('تفصيل العملات'),
                     pw.SizedBox(height: 2),
-                    if (hasDenoms1) denomsTable(data.denoms1, data.currencyCode),
+                    if (hasDenoms1)
+                      denomsTable(
+                        data.denoms1,
+                        data.currencyName.isNotEmpty
+                            ? data.currencyName
+                            : data.currencyCode,
+                      ),
                     if (hasDenoms2) ...[
                       pw.SizedBox(height: 5),
                       sectionTitle(
-                        'فئات المبلغ الثاني (${data.currencyCode2})',
+                        'فئات المبلغ الثاني: ${data.currencyName2 ?? data.currencyCode2}',
                       ),
                       pw.SizedBox(height: 2),
-                      denomsTable(data.denoms2!, data.currencyCode2!),
+                      denomsTable(
+                        data.denoms2!,
+                        data.currencyName2 ?? data.currencyCode2!,
+                      ),
                     ],
                   ],
 

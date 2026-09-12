@@ -124,6 +124,13 @@ class _AddSentPageState extends State<AddSentPage> {
     final denomNote =
         "[الفئات المستلمة للحوالة لـ ${currency1.code}: ${_formatCounts(counts1)}]";
 
+    // عكس أثر الفئات القديمة قبل تطبيق الجديدة (تعديل صحيح بالفرق).
+    if (_isEditMode) {
+      await CurrencyDenoms.reverseOldStock(
+        widget.transaction!,
+        {for (final c in _currencies) c.id: c},
+      );
+    }
     await CurrencyDenoms.addStock(currency1, counts1);
 
     if (_isEditMode) {

@@ -191,7 +191,13 @@ class _AddReceivePageState extends State<AddReceivePage> {
           "\n[الفئات المستلمة لـ ${currency2.code}: ${_formatCounts(counts2)}]";
     }
 
-    // إضافة للمخزون المتوفر
+    // عكس أثر الفئات القديمة قبل تطبيق الجديدة (تعديل صحيح بالفرق).
+    if (_isEditMode) {
+      await CurrencyDenoms.reverseOldStock(
+        widget.transaction!,
+        {for (final c in _currencies) c.id: c},
+      );
+    }
     await CurrencyDenoms.addStock(currency1, counts1);
     if (counts2 != null && currency2 != null) {
       await CurrencyDenoms.addStock(currency2, counts2);

@@ -216,6 +216,13 @@ class _AddDeliveryPageState extends State<AddDeliveryPage> {
       finalNote = noteText.isEmpty ? denomStr : "$noteText\n$denomStr";
 
       // خصم من مخزون الصندوق (حركة يوزر تُسلَّم فوراً)
+      // عكس أثر الفئات القديمة قبل خصم الجديدة (تعديل صحيح بالفرق).
+      if (_isEditMode) {
+        await CurrencyDenoms.reverseOldStock(
+          widget.transaction!,
+          {for (final c in _currencies) c.id: c},
+        );
+      }
       await CurrencyDenoms.deductStock(currency1, userCounts1);
       if (userCounts2 != null && userCurrency2 != null) {
         await CurrencyDenoms.deductStock(userCurrency2, userCounts2);
