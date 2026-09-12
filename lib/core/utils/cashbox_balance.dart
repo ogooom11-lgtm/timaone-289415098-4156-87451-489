@@ -103,23 +103,15 @@ class CashboxBalanceCalculator {
           );
         }
       }
-      // 3. حركة مرسلة
+      // 3. حركة مرسلة — المستلم والأجور فقط يدخلان الصندوق.
+      //    المبلغ المرسل لا يؤثّر على الأرصدة (يُسوَّى بين المكاتب).
       else if (type == 'حركة مرسلة' || type.contains('مرسلة')) {
         apply(
           afterDeliveryMode: afterDeliveryMode,
           currencyId: transaction.currencyId,
           value: transaction.amount,
-          source: 'مرسلة رئيسي (+)',
+          source: 'مرسلة مستلم (+)',
         );
-        if (transaction.targetCurrencyId != null &&
-            transaction.targetAmount != null) {
-          apply(
-            afterDeliveryMode: afterDeliveryMode,
-            currencyId: transaction.targetCurrencyId,
-            value: -transaction.targetAmount!,
-            source: 'مرسلة مرسل (-)',
-          );
-        }
         if (transaction.feesCurrencyId != null && transaction.fees != null) {
           apply(
             afterDeliveryMode: afterDeliveryMode,

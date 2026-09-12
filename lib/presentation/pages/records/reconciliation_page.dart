@@ -252,18 +252,10 @@ class _ReconciliationPageState extends State<ReconciliationPage> {
         currentBalances[currency.code] =
             (currentBalances[currency.code] ?? 0.0) + tx.amount;
       }
-      // 3. حركة مرسلة
+      // 3. حركة مرسلة — المستلم والأجور فقط. المرسل لا يؤثّر على الرصيد.
       else if (type == "حركة مرسلة" || type.contains("مرسلة")) {
         currentBalances[currency.code] =
             (currentBalances[currency.code] ?? 0.0) + tx.amount;
-        if (tx.targetCurrencyId != null && tx.targetAmount != null) {
-          final targetCurrency = _currencies[tx.targetCurrencyId!];
-          if (targetCurrency != null) {
-            currentBalances[targetCurrency.code] =
-                (currentBalances[targetCurrency.code] ?? 0.0) -
-                tx.targetAmount!;
-          }
-        }
         if (tx.feesCurrencyId != null && tx.fees != null) {
           final feesCurrency = _currencies[tx.feesCurrencyId!];
           if (feesCurrency != null) {
