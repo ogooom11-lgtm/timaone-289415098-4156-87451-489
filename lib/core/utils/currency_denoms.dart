@@ -105,16 +105,6 @@ class CurrencyDenoms {
     return m?.group(1);
   }
 
-  /// أثر حركة قديمة على مخزون الأوراق: الفئات المسجّلة + اتجاهها.
-  ///
-  /// يُستخدم عند تعديل حركة سبق أن لامست المخزون، لعكس أثرها القديم
-  /// قبل تطبيق الفئات الجديدة، فيتحدّث الرصيد بالفرق الصحيح فقط.
-  class OldStockEffect {
-    final Map<double, int> counts;
-    final bool isInflow;
-    const OldStockEffect(this.counts, this.isInflow);
-  }
-
   /// يجمع أزواج (رمز العملة ← الفئات) من أسطر مثل `[بادئة USD: 100x1]`.
   static Map<String, Map<double, int>> _allCodeCounts(
     String note,
@@ -308,4 +298,14 @@ class CurrencyDenoms {
     }
     return result;
   }
+}
+
+/// أثر حركة قديمة على مخزون الأوراق: الفئات المسجّلة + اتجاهها.
+///
+/// يُستخدم عند تعديل حركة سبق أن لامست المخزون، لعكس أثرها القديم
+/// قبل تطبيق الفئات الجديدة، فيتحدّث الرصيد بالفرق الصحيح فقط.
+class OldStockEffect {
+  final Map<double, int> counts;
+  final bool isInflow;
+  const OldStockEffect(this.counts, this.isInflow);
 }
