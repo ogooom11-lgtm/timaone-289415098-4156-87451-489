@@ -99,6 +99,135 @@ class _AddDeliveryPageState extends State<AddDeliveryPage> {
         .join(", ");
   }
 
+  /// يزيل طوابع الفئات/التسليم من الملاحظة ويبقي نص المستخدم فقط.
+  String _stripDenomMarkers(String note) {
+    return note
+        .replaceAll(RegExp(r'\[تم التسليم في [^\]]+\]'), '')
+        .replaceAll(RegExp(r'\[فئات المسلم 2: [^\]]+\]'), '')
+        .replaceAll(RegExp(r'\[فئات المسلم: [^\]]+\]'), '')
+        .replaceAll(RegExp(r'\[الفئات المسلمة لـ [^\]]+\]'), '')
+        .trim();
+  }
+
+  /// يبني الملاحظة الكاملة (نص المستخدم + طوابع الفئات) وفق صيغة كل نوع،
+  /// محافظاً على سطر وقت التسليم إن كان موجوداً في الملاحظة القديمة.
+  String _buildDenomNote({
+    required String userNote,
+    required String? oldNote,
+    required bool isUserType,
+    required Currency currency1,
+    required Map<double, int> counts1,
+    Currency? currency2,
+    Map<double, int>? counts2,
+  }) {
+    final cleanUserNote = _stripDenomMarkers(userNote);
+    final lines = <String>[
+      if (cleanUserNote.isNotEmpty) cleanUserNote,
+    ];
+    if (isUserType) {
+      lines.add("[الفئات المسلمة لـ ${currency1.code}: ${_formatCounts(counts1)}]");
+      if (counts2 != null && currency2 != null) {
+        lines.add(
+          "[الفئات المسلمة لـ ${currency2.code}: ${_formatCounts(counts2)}]",
+        );
+      }
+    } else {
+      final deliveredLine =
+          RegExp(r'\[تم التسليم في [^\]]+\]').firstMatch(oldNote ?? '')
+              ?.group(0) ??
+          "[تم التسليم في ${DateFormat('yyyy-MM-dd HH:mm').format(DateTime.now())}]";
+      lines.add(deliveredLine);
+      lines.add("[فئات المسلم: ${CurrencyDenoms.formatCounts(counts1)}]");
+      if (counts2 != null && currency2 != null) {
+        lines.add(
+          "[فئات المسلم 2: ${CurrencyDenoms.formatCounts(counts2)} (${currency2.code})]",
+        );
+      }
+    }
+    return lines.join("\n");
+  }
+
+  /// تعديل الفئات فقط (دون تغيير بقية الحقول) لحركة مُسلَّمة.
+  Future<void> _editDenomsOnly() async {
+    final oldTx = widget.transaction!;
+    if (_currencies.isEmpty) return;
+    final currency1 = _currencies.firstWhere((c) => c.id == oldTx.currencyId);
+    final stock1 = await CurrencyDenoms.loadStock(currency1);
+    if (!mounted) return;
+    final counts1 = await showDialog<Map<double, int>>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => DenomValidatorDialog(
+        targetAmount: oldTx.amount,
+        currency: currency1,
+        title: "تعديل فئات المبلغ المسلم",
+        mode: DenomDialogMode.outflow,
+        availableStock: stock1,
+      ),
+    );
+    if (counts1 == null) return;
+
+    Map<double, int>? counts2;
+    Currency? currency2;
+    if (oldTx.targetAmount != null &&
+        oldTx.targetAmount! > 0 &&
+        oldTx.targetCurrencyId != null) {
+      currency2 = _currencies.firstWhere((c) => c.id == oldTx.targetCurrencyId);
+      final stock2 = await CurrencyDenoms.loadStock(currency2);
+      if (!mounted) return;
+      counts2 = await showDialog<Map<double, int>>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => DenomValidatorDialog(
+          targetAmount: oldTx.targetAmount!,
+          currency: currency2!,
+          title: "تعديل فئات المبلغ المسلم الثاني",
+          mode: DenomDialogMode.outflow,
+          availableStock: stock2,
+        ),
+      );
+      if (counts2 == null) return;
+    }
+
+    // تسوية المخزون: عكس القديم ثم خصم الجديد.
+    await CurrencyDenoms.reverseOldStock(
+      oldTx,
+      {for (final c in _currencies) c.id: c},
+    );
+    await CurrencyDenoms.deductStock(currency1, counts1);
+    if (counts2 != null && currency2 != null) {
+      await CurrencyDenoms.deductStock(currency2, counts2);
+    }
+
+    final newNote = _buildDenomNote(
+      userNote: oldTx.note ?? "",
+      oldNote: oldTx.note,
+      isUserType: oldTx.type == "حركة يوزر",
+      currency1: currency1,
+      counts1: counts1,
+      currency2: currency2,
+      counts2: counts2,
+    );
+
+    await widget.db.updateTransaction(
+      oldTx.id,
+      TransactionsCompanion(note: drift.Value(newNote)),
+    );
+    await widget.db.insertEdit(
+      EditsCompanion(
+        transactionId: drift.Value(oldTx.id),
+        field: drift.Value("تعديل الفئات"),
+        oldValue: drift.Value(oldTx.note ?? ""),
+        newValue: drift.Value(newNote),
+        editedBy: drift.Value(widget.user.username),
+      ),
+    );
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text("تم تعديل الفئات وتحديث مخزون الصندوق")),
+    );
+  }
+
   Future<void> _showUserDeliverySuccess({
     required String beneficiary,
     required double amount,
@@ -165,11 +294,35 @@ class _AddDeliveryPageState extends State<AddDeliveryPage> {
     );
     String finalNote = noteText;
 
-    // جرد وتفصيل فئات حركة يوزر (تُسلَّم فوراً)
+    // ---------------------------------------------------------------
+    // جرد الفئات وتحديث مخزون الصندوق.
+    //
+    // متى نطلب الفئات؟
+    //  • إنشاء حركة يوزر: فوراً (تُسلَّم مباشرة).
+    //  • إنشاء حركة تسليم: لا (تبقى معلقة حتى التسليم من صفحة السجل).
+    //  • تعديل حركة مُسلَّمة (يوزر، أو تسليم حالتها «تم التسليم»): نعيد جرد
+    //    الفئات ونسوّي المخزون بالفرق — إلا إذا كان التعديل على الاسم/الملاحظة
+    //    فقط (المبالغ والعملات لم تتغيّر) فلا نطلب الفئات ولا نلمس الصندوق.
+    // ---------------------------------------------------------------
+    final prevTx = _isEditMode ? widget.transaction! : null;
+    final bool isUserType = _deliveryType == "حركة يوزر";
+    final bool wasDelivered = prevTx?.status == "تم التسليم";
+    bool nameOnlyEdit = false;
+    if (prevTx != null) {
+      nameOnlyEdit =
+          prevTx.amount == amountVal &&
+          prevTx.currencyId == _selectedCurrencyId &&
+          (prevTx.targetAmount ?? 0) == (amount2Val ?? 0) &&
+          prevTx.targetCurrencyId == currency2Val;
+    }
+    final bool needDenoms = !_isEditMode
+        ? isUserType
+        : (isUserType || wasDelivered) && !nameOnlyEdit;
+
     Map<double, int>? userCounts1;
     Map<double, int>? userCounts2;
     Currency? userCurrency2;
-    if (_deliveryType == "حركة يوزر") {
+    if (needDenoms) {
       final stock1 = await CurrencyDenoms.loadStock(currency1);
       if (!mounted) return;
       final counts1 = await showDialog<Map<double, int>>(
@@ -178,7 +331,9 @@ class _AddDeliveryPageState extends State<AddDeliveryPage> {
         builder: (_) => DenomValidatorDialog(
           targetAmount: amountVal,
           currency: currency1,
-          title: "تفصيل فئات المبلغ المسلم (حركة يوزر)",
+          title: isUserType
+              ? "تفصيل فئات المبلغ المسلم (حركة يوزر)"
+              : "تفصيل فئات المبلغ المسلم",
           mode: DenomDialogMode.outflow,
           availableStock: stock1,
         ),
@@ -196,7 +351,9 @@ class _AddDeliveryPageState extends State<AddDeliveryPage> {
           builder: (_) => DenomValidatorDialog(
             targetAmount: amount2Val,
             currency: userCurrency2!,
-            title: "تفصيل فئات المبلغ المسلم الثاني (حركة يوزر)",
+            title: isUserType
+                ? "تفصيل فئات المبلغ المسلم الثاني (حركة يوزر)"
+                : "تفصيل فئات المبلغ المسلم الثاني",
             mode: DenomDialogMode.outflow,
             availableStock: stock2,
           ),
@@ -205,21 +362,20 @@ class _AddDeliveryPageState extends State<AddDeliveryPage> {
         userCounts2 = counts2;
       }
 
-      // بناء الملاحظة الموثقة للفئات المسلمة
-      String denomStr =
-          "[الفئات المسلمة لـ ${currency1.code}: ${_formatCounts(userCounts1)}]";
-      if (userCounts2 != null && userCurrency2 != null) {
-        denomStr +=
-            "\n[الفئات المسلمة لـ ${userCurrency2.code}: ${_formatCounts(userCounts2)}]";
-      }
+      finalNote = _buildDenomNote(
+        userNote: noteText,
+        oldNote: prevTx?.note,
+        isUserType: isUserType,
+        currency1: currency1,
+        counts1: userCounts1!,
+        currency2: userCurrency2,
+        counts2: userCounts2,
+      );
 
-      finalNote = noteText.isEmpty ? denomStr : "$noteText\n$denomStr";
-
-      // خصم من مخزون الصندوق (حركة يوزر تُسلَّم فوراً)
-      // عكس أثر الفئات القديمة قبل خصم الجديدة (تعديل صحيح بالفرق).
-      if (_isEditMode) {
+      // عكس أثر الفئات القديمة ثم خصم الجديدة (تسوية بالفرق لا تراكم).
+      if (prevTx != null) {
         await CurrencyDenoms.reverseOldStock(
-          widget.transaction!,
+          prevTx,
           {for (final c in _currencies) c.id: c},
         );
       }
@@ -938,6 +1094,19 @@ class _AddDeliveryPageState extends State<AddDeliveryPage> {
         const SizedBox(height: 24),
 
         // Action Buttons
+        if (_isEditMode && widget.transaction!.status == "تم التسليم") ...[
+          OutlinedButton.icon(
+            style: OutlinedButton.styleFrom(
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(AppDims.radiusSm),
+              ),
+            ),
+            onPressed: _editDenomsOnly,
+            icon: const Icon(Icons.category_rounded),
+            label: const Text("تعديل الفئات فقط"),
+          ),
+          const SizedBox(height: 12),
+        ],
         if (_isEditMode)
           Row(
             children: [

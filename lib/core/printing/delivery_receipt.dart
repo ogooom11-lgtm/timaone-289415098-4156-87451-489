@@ -178,7 +178,11 @@ class DeliveryReceiptService {
   }
 
   static String _fmtDate(DateTime d) {
-    return DateFormat('yyyy/MM/dd  HH:mm').format(d.toLocal());
+    return DateFormat('yyyy/MM/dd').format(d.toLocal());
+  }
+
+  static String _fmtTime(DateTime d) {
+    return DateFormat('HH:mm').format(d.toLocal());
   }
 
   static String _fmtDenom(double d) =>
@@ -506,6 +510,8 @@ class DeliveryReceiptService {
                   infoRow('الاسم :', data.beneficiary, strong: true),
                   if (settings.showDateTime)
                     infoRow('التاريخ :', _fmtDate(data.dateTime)),
+                  if (settings.showDateTime)
+                    infoRow('الوقت :', _fmtTime(data.dateTime)),
                   if (settings.showStatus && data.status.isNotEmpty)
                     infoRow('الحالة :', data.status),
                   if (settings.showCreatedBy && data.createdBy.isNotEmpty)

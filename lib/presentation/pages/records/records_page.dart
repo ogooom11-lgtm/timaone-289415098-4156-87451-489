@@ -115,6 +115,13 @@ class _RecordsPageState extends State<RecordsPage> {
   bool _canceledOf(Transaction tx) =>
       tx.movementState == 'ملغية' || tx.status == 'الغاء';
 
+  /// الحركة المعلقة = حركة تسليم حالتها «مضافة» (لم تُلغَ ولم تُسلَّم).
+  /// بقية الأنواع (استلام/مرسلة/تسوية/يوزر) لا تدخل في تبويب المعلقة.
+  bool _isPending(Transaction tx) =>
+      !_canceledOf(tx) &&
+      _kindOf(tx.type) == _TxKind.delivery &&
+      tx.status == 'مضافة';
+
   List<Transaction> get _scopedTransactions {
     final query = _searchController.text.trim();
     final now = DateTime.now();
@@ -162,7 +169,8 @@ class _RecordsPageState extends State<RecordsPage> {
     return scoped.where((tx) {
       if (_canceledOf(tx)) return _statusFilter == 'ملغية';
       if (tx.status == 'تم التسليم') return _statusFilter == 'مسلمة';
-      return _statusFilter == 'معلقة';
+      if (_isPending(tx)) return _statusFilter == 'معلقة';
+      return false;
     }).toList();
   }
 
@@ -173,7 +181,7 @@ class _RecordsPageState extends State<RecordsPage> {
         counts['ملغية'] = counts['ملغية']! + 1;
       } else if (tx.status == 'تم التسليم') {
         counts['مسلمة'] = counts['مسلمة']! + 1;
-      } else {
+      } else if (_isPending(tx)) {
         counts['معلقة'] = counts['معلقة']! + 1;
       }
     }
@@ -205,22 +213,6 @@ class _RecordsPageState extends State<RecordsPage> {
       _searchController.clear();
       _visibleLimit = 20;
     });
-  }
-
-  Future<void> _pickDate() async {
-    final date = await showDatePicker(
-      context: context,
-      initialDate: _selectedDate ?? DateTime.now(),
-      firstDate: DateTime(2020),
-      lastDate: DateTime.now(),
-    );
-    if (date != null && mounted) {
-      setState(() {
-        _selectedDate = date;
-        _dateFilter = 'تاريخ محدد';
-        _visibleLimit = 20;
-      });
-    }
   }
 
   // -------------------------------------------------------------------
@@ -869,7 +861,91 @@ class _RecordsPageState extends State<RecordsPage> {
     );
   }
 
+  bool get _hasNonSearchFilters =>
+      _typeFilter != null ||
+      _currencyFilter != null ||
+      _statusFilter != null ||
+      _dateFilter != 'من أمس';
+
   Widget _buildFilters(BuildContext context) {
+    return TimaPanel(
+      padding: const EdgeInsets.all(12),
+      child: Row(
+        children: [
+          Expanded(
+            child: TextField(
+              controller: _searchController,
+              decoration: InputDecoration(
+                hintText: 'ابحث بالاسم أو نوع الحركة أو اسم المسجّل…',
+                prefixIcon: const Icon(Icons.search_rounded),
+                suffixIcon: _searchController.text.isEmpty
+                    ? null
+                    : IconButton(
+                        tooltip: 'مسح البحث',
+                        icon: const Icon(Icons.close_rounded, size: 17),
+                        onPressed: () => setState(
+                          () => _searchController.clear(),
+                        ),
+                      ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Tooltip(
+            message: 'الفلاتر',
+            child: Stack(
+              clipBehavior: Clip.none,
+              children: [
+                OutlinedButton(
+                  onPressed: _openFilterDialog,
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 15,
+                      vertical: 15,
+                    ),
+                  ),
+                  child: Icon(
+                    Icons.tune_rounded,
+                    size: 20,
+                    color: _hasNonSearchFilters
+                        ? AppColors.brandGreen
+                        : null,
+                  ),
+                ),
+                if (_hasNonSearchFilters)
+                  Positioned(
+                    right: 7,
+                    top: 7,
+                    child: Container(
+                      width: 9,
+                      height: 9,
+                      decoration: const BoxDecoration(
+                        color: AppColors.warning,
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 10),
+          OutlinedButton.icon(
+            onPressed: _hasActiveFilters ? _resetFilters : null,
+            icon: const Icon(Icons.filter_alt_off_outlined, size: 17),
+            label: const Text('تصفير'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _openFilterDialog() async {
+    String? type = _typeFilter;
+    int? currency = _currencyFilter;
+    String date = _dateFilter;
+    DateTime? specific = _selectedDate;
+    String? status = _statusFilter;
+
     final typeCounts = _typeCounts;
     final typeOrder = <String>[
       'حركة تسليم',
@@ -883,124 +959,165 @@ class _RecordsPageState extends State<RecordsPage> {
       ...typeCounts.keys.where((t) => !typeOrder.contains(t)),
     ];
 
-    return TimaPanel(
-      padding: const EdgeInsets.all(12),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: _searchController,
-                  decoration: InputDecoration(
-                    hintText: 'ابحث بالاسم أو نوع الحركة أو اسم المسجّل…',
-                    prefixIcon: const Icon(Icons.search_rounded),
-                    suffixIcon: _searchController.text.isEmpty
-                        ? null
-                        : IconButton(
-                            tooltip: 'مسح البحث',
-                            icon: const Icon(Icons.close_rounded, size: 17),
-                            onPressed: () => setState(
-                              () => _searchController.clear(),
-                            ),
-                          ),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 10),
-              SizedBox(
-                width: 168,
-                child: DropdownButtonFormField<int?>(
-                  value: _currencyFilter,
-                  isDense: true,
-                  decoration: const InputDecoration(
-                    labelText: 'العملة',
-                    prefixIcon: Icon(Icons.paid_outlined),
-                  ),
-                  items: [
-                    const DropdownMenuItem(
-                      value: null,
-                      child: Text('كل العملات'),
-                    ),
-                    ..._currencies.values.map(
-                      (currency) => DropdownMenuItem<int?>(
-                        value: currency.id,
-                        child: Text(currency.code),
+    Widget label(String text) => Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Text(
+        text,
+        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+      ),
+    );
+
+    await showDialog<void>(
+      context: context,
+      builder: (dialogCtx) => StatefulBuilder(
+        builder: (ctx, setLocal) => AlertDialog(
+          title: const Text('تصفية الحركات'),
+          content: SizedBox(
+            width: 430,
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  label('النوع'),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      _ChipButton(
+                        label: 'كل الأنواع',
+                        icon: Icons.all_inclusive_rounded,
+                        count: _transactions.length,
+                        selected: type == null,
+                        onTap: () => setLocal(() => type = null),
                       ),
+                      ...types.map((t) {
+                        final kind = _kindOf(t);
+                        return _ChipButton(
+                          label: t,
+                          icon: _iconOf(kind),
+                          color: _colorOf(kind),
+                          count: typeCounts[t] ?? 0,
+                          selected: type == t,
+                          onTap: () =>
+                              setLocal(() => type = type == t ? null : t),
+                        );
+                      }),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  label('العملة'),
+                  DropdownButtonFormField<int?>(
+                    value: currency,
+                    isDense: true,
+                    decoration: const InputDecoration(
+                      labelText: 'العملة',
+                      prefixIcon: Icon(Icons.paid_outlined),
                     ),
-                  ],
-                  onChanged: (value) => setState(() {
-                    _currencyFilter = value;
-                    _visibleLimit = 20;
-                  }),
-                ),
+                    items: [
+                      const DropdownMenuItem(
+                        value: null,
+                        child: Text('كل العملات'),
+                      ),
+                      ..._currencies.values.map(
+                        (c) => DropdownMenuItem<int?>(
+                          value: c.id,
+                          child: Text(c.code),
+                        ),
+                      ),
+                    ],
+                    onChanged: (value) => setLocal(() => currency = value),
+                  ),
+                  const SizedBox(height: 16),
+                  label('الفترة'),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      for (final period in const ['اليوم', 'من أمس', 'الكل'])
+                        _ChipButton(
+                          label: period,
+                          icon: Icons.event_rounded,
+                          selected: date == period,
+                          onTap: () => setLocal(() => date = period),
+                        ),
+                      _ChipButton(
+                        label: specific == null
+                            ? 'تاريخ محدد'
+                            : DateFormat('MM-dd').format(specific!),
+                        icon: Icons.calendar_month_rounded,
+                        selected: date == 'تاريخ محدد',
+                        onTap: () async {
+                          final picked = await showDatePicker(
+                            context: ctx,
+                            initialDate: specific ?? DateTime.now(),
+                            firstDate: DateTime(2020),
+                            lastDate: DateTime.now(),
+                          );
+                          if (picked != null) {
+                            setLocal(() {
+                              specific = picked;
+                              date = 'تاريخ محدد';
+                            });
+                          }
+                        },
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  label('الحالة'),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      _ChipButton(
+                        label: 'كل الحالات',
+                        icon: Icons.all_inclusive_rounded,
+                        selected: status == null,
+                        onTap: () => setLocal(() => status = null),
+                      ),
+                      for (final s in const ['معلقة', 'مسلمة', 'ملغية'])
+                        _ChipButton(
+                          label: s,
+                          icon: Icons.flag_rounded,
+                          count: _statusCounts[s] ?? 0,
+                          selected: status == s,
+                          onTap: () =>
+                              setLocal(() => status = status == s ? null : s),
+                        ),
+                    ],
+                  ),
+                ],
               ),
-              const SizedBox(width: 10),
-              OutlinedButton.icon(
-                onPressed: _hasActiveFilters ? _resetFilters : null,
-                icon: const Icon(Icons.filter_alt_off_outlined, size: 17),
-                label: const Text('تصفير'),
-              ),
-            ],
+            ),
           ),
-          const SizedBox(height: 11),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              _ChipButton(
-                label: 'كل الأنواع',
-                icon: Icons.all_inclusive_rounded,
-                count: _transactions.length,
-                selected: _typeFilter == null,
-                onTap: () => setState(() {
-                  _typeFilter = null;
-                  _visibleLimit = 20;
-                }),
-              ),
-              ...types.map((type) {
-                final kind = _kindOf(type);
-                return _ChipButton(
-                  label: type,
-                  icon: _iconOf(kind),
-                  color: _colorOf(kind),
-                  count: typeCounts[type] ?? 0,
-                  selected: _typeFilter == type,
-                  onTap: () => setState(() {
-                    _typeFilter = _typeFilter == type ? null : type;
-                    _visibleLimit = 20;
-                  }),
-                );
+          actions: [
+            TextButton(
+              onPressed: () => setLocal(() {
+                type = null;
+                currency = null;
+                date = 'من أمس';
+                specific = null;
+                status = null;
               }),
-              Container(
-                width: 1,
-                height: 22,
-                margin: const EdgeInsets.symmetric(horizontal: 4),
-                color: AppUi.border(context),
-              ),
-              for (final period in const ['اليوم', 'من أمس', 'الكل'])
-                _ChipButton(
-                  label: period,
-                  icon: Icons.event_rounded,
-                  selected: _dateFilter == period,
-                  onTap: () => setState(() {
-                    _dateFilter = period;
-                    _visibleLimit = 20;
-                  }),
-                ),
-              _ChipButton(
-                label: _selectedDate == null
-                    ? 'تاريخ محدد'
-                    : DateFormat('MM-dd').format(_selectedDate!),
-                icon: Icons.calendar_month_rounded,
-                selected: _dateFilter == 'تاريخ محدد',
-                onTap: _pickDate,
-              ),
-            ],
-          ),
-        ],
+              child: const Text('تصفير'),
+            ),
+            FilledButton(
+              onPressed: () {
+                setState(() {
+                  _typeFilter = type;
+                  _currencyFilter = currency;
+                  _dateFilter = date;
+                  _selectedDate = specific;
+                  _statusFilter = status;
+                  _visibleLimit = 20;
+                });
+                Navigator.pop(dialogCtx);
+              },
+              child: const Text('تطبيق'),
+            ),
+          ],
+        ),
       ),
     );
   }

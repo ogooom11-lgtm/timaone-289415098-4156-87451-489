@@ -133,8 +133,17 @@ class CurrencyDenoms {
     if (tx.type.contains('تسليم') || tx.type == 'حركة يوزر') {
       final c1 = byId(tx.currencyId);
       final c2 = byId(tx.targetCurrencyId);
-      final d1 = parseCounts(extractDeliveredDenomsNote(note));
-      final d2 = parseCounts(extractDeliveredDenomsNote2(note));
+      // صيغة التسليم: [فئات المسلم: ...] و[فئات المسلم 2: ... (CODE)]
+      var d1 = parseCounts(extractDeliveredDenomsNote(note));
+      var d2 = parseCounts(extractDeliveredDenomsNote2(note));
+      // صيغة يوزر: [الفئات المسلمة لـ CODE: ...] لكل عملة على حدة.
+      if (d1.isEmpty) {
+        final byCode = _allCodeCounts(note, 'الفئات المسلمة لـ');
+        if (byCode.isNotEmpty) {
+          d1 = (c1 != null ? byCode[c1.code] : null) ?? byCode.values.first;
+          d2 = (c2 != null ? byCode[c2.code] : null) ?? const {};
+        }
+      }
       if (c1 != null && d1.isNotEmpty) out[c1.id] = OldStockEffect(d1, false);
       if (c2 != null && d2.isNotEmpty) out[c2.id] = OldStockEffect(d2, false);
       return out;
