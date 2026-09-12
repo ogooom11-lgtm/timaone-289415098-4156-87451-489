@@ -342,6 +342,7 @@ class _ReconciliationPageState extends State<ReconciliationPage> {
       history.add(newMatch);
       await DeviceSettings.saveReconciliations(history);
 
+      if (!context.mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(

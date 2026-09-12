@@ -171,6 +171,7 @@ class _AddDeliveryPageState extends State<AddDeliveryPage> {
     Currency? userCurrency2;
     if (_deliveryType == "حركة يوزر") {
       final stock1 = await CurrencyDenoms.loadStock(currency1);
+      if (!mounted) return;
       final counts1 = await showDialog<Map<double, int>>(
         context: context,
         barrierDismissible: false,
@@ -188,6 +189,7 @@ class _AddDeliveryPageState extends State<AddDeliveryPage> {
       if (_showSecondAmount && amount2Val != null && currency2Val != null) {
         userCurrency2 = _currencies.firstWhere((c) => c.id == currency2Val);
         final stock2 = await CurrencyDenoms.loadStock(userCurrency2);
+        if (!mounted) return;
         final counts2 = await showDialog<Map<double, int>>(
           context: context,
           barrierDismissible: false,

@@ -117,6 +117,7 @@ class _AddExchangePageState extends State<AddExchangePage> {
 
     // 1. فئات الصادر — مقيدة بمخزون الصندوق
     final stockFrom = await CurrencyDenoms.loadStock(currencyFrom);
+    if (!mounted) return;
     final countsFrom = await showDialog<Map<double, int>>(
       context: context,
       barrierDismissible: false,
@@ -131,6 +132,7 @@ class _AddExchangePageState extends State<AddExchangePage> {
     if (countsFrom == null) return; // تراجع المستخدم
 
     // 2. فئات الوارد — بدون قيد مخزون (تدخل للصندوق)
+    if (!mounted) return;
     final countsTo = await showDialog<Map<double, int>>(
       context: context,
       barrierDismissible: false,

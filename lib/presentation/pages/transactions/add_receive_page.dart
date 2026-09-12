@@ -169,6 +169,7 @@ class _AddReceivePageState extends State<AddReceivePage> {
     Currency? currency2;
     if (_showSecondAmount && amount2Val != null && currency2Val != null) {
       currency2 = _currencies.firstWhere((c) => c.id == currency2Val);
+      if (!mounted) return;
       counts2 = await showDialog<Map<double, int>>(
         context: context,
         barrierDismissible: false,

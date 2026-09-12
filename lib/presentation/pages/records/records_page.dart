@@ -2,7 +2,7 @@ import 'dart:math' as math;
 
 import 'package:drift/drift.dart' as drift;
 import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
+import 'package:intl/intl.dart' hide TextDirection;
 
 import '../../../core/printing/delivery_receipt.dart';
 import '../../../core/services/app_sound.dart';
@@ -1382,8 +1382,8 @@ class _TransactionRowState extends State<_TransactionRow> {
         const SizedBox(width: 8),
         Flexible(
           child: Text(
-            widget.formatAmount(widget.transaction.amount) +
-                ' ${widget.currencyCode(widget.transaction.currencyId)}',
+            '${widget.formatAmount(widget.transaction.amount)} '
+            '${widget.currencyCode(widget.transaction.currencyId)}',
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: TextStyle(

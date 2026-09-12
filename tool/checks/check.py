@@ -334,6 +334,11 @@ def check_conventions():
             if re.search(r'\bwithOpacity\(', line):
                 errs.append(f'{rel(f)}:{ln}: withOpacity is deprecated, '
                             f'use withValues(alpha:)')
+            if re.search(r"^import 'dart:typed_data';", line):
+                src = open(f, encoding='utf-8').read()
+                if "package:flutter/services.dart" in src:
+                    errs.append(f'{rel(f)}:{ln}: unnecessary_import — '
+                                f'flutter/services already exports dart:typed_data')
     # DropdownButtonFormField takes `value:`, not `initialValue:`
     for f in dart_files():
         src = open(f, encoding='utf-8').read()
@@ -342,7 +347,39 @@ def check_conventions():
             ln = src[:m.start()].count('\n') + 1
             errs.append(f'{rel(f)}:{ln}: DropdownButtonFormField uses '
                         f'value:, not initialValue:')
+        # A const map cannot have double keys (const_map_key_not_primitive_equality).
+        for m in re.finditer(r'\bconst\s*(?:<[^>]*>)?\s*\{', src):
+            body = _balanced(src, src.index('{', m.end() - 1))
+            if body and re.search(r'(?<![\w.])\d+\.\d*\s*:', body):
+                ln = src[:m.start()].count('\n') + 1
+                errs.append(f'{rel(f)}:{ln}: const map with a double key is '
+                            f'illegal — drop const (const_map_key_not_primitive_equality)')
+        # package:intl exports its own TextDirection (LTR/RTL), which shadows
+        # dart:ui's (rtl/ltr) and breaks TextDirection.rtl.
+        intl = re.search(r"import\s+'package:intl/intl\.dart'([^;]*);", src)
+        if intl and 'hide TextDirection' not in intl.group(1):
+            for m in re.finditer(r'(?<!pw\.)\bTextDirection\.(rtl|ltr)\b', src):
+                ln = src[:m.start()].count('\n') + 1
+                errs.append(f'{rel(f)}:{ln}: TextDirection.{m.group(1)} resolves '
+                            f'to the intl enum — add "hide TextDirection" to the '
+                            f'intl import')
     return errs, 'no known-bad API patterns'
+
+
+def _balanced(src, start):
+    """Text inside the braces opening at `start`, or None if unbalanced."""
+    depth, i = 0, start
+    while i < len(src):
+        c = src[i]
+        if c == '{':
+            depth += 1
+        elif c == '}':
+            depth -= 1
+            if depth == 0:
+                return src[start + 1:i]
+        i += 1
+    return None
+
 
 
 def main():

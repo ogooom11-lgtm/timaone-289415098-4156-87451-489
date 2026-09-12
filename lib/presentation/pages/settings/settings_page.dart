@@ -98,6 +98,7 @@ class _SettingsPageState extends State<SettingsPage> {
         'UPDATE users SET password = ? WHERE id = ?',
         [newPass, _currentUser.id],
       );
+      if (!context.mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text("تم تغيير كلمة المرور بنجاح")),
       );
@@ -222,6 +223,7 @@ class _SettingsPageState extends State<SettingsPage> {
             rate: drift.Value(rate),
           ),
         );
+        if (!context.mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text("تم تعديل العملة وفئاتها الورقية بنجاح"),
@@ -235,6 +237,7 @@ class _SettingsPageState extends State<SettingsPage> {
             rate: drift.Value(rate),
           ),
         );
+        if (!context.mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text("تم إضافة العملة وحفظ فئاتها الورقية")),
         );
@@ -267,6 +270,7 @@ class _SettingsPageState extends State<SettingsPage> {
 
     if (confirmed == true) {
       await widget.db.deleteCurrency(currency.id);
+      if (!context.mounted) return;
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text("تم حذف العملة")));
@@ -340,6 +344,7 @@ class _SettingsPageState extends State<SettingsPage> {
           role: const drift.Value('user'),
         ),
       );
+      if (!context.mounted) return;
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text("تم تسجيل الحساب بنجاح")));
@@ -378,6 +383,7 @@ class _SettingsPageState extends State<SettingsPage> {
       await widget.db.customStatement('DELETE FROM users WHERE id = ?', [
         user.id,
       ]);
+      if (!context.mounted) return;
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text("تم حذف حساب المستخدم")));
@@ -425,10 +431,12 @@ class _SettingsPageState extends State<SettingsPage> {
       final officeName = controller.text.trim();
       try {
         await widget.db.addOffice(officeName);
+        if (!context.mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text("تم إضافة مكتب العمل بنجاح")),
         );
       } catch (_) {
+        if (!context.mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text("هذا المكتب موجود بالفعل في قاعدة البيانات!"),
@@ -463,6 +471,7 @@ class _SettingsPageState extends State<SettingsPage> {
 
     if (confirmed == true) {
       await widget.db.deleteOffice(officeName);
+      if (!context.mounted) return;
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text("تم حذف مكتب العمل")));
@@ -497,6 +506,7 @@ class _SettingsPageState extends State<SettingsPage> {
     if (confirmed == true) {
       await widget.db.customStatement('DELETE FROM edits');
       await widget.db.customStatement('DELETE FROM transactions');
+      if (!context.mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text("تم إعادة تهيئة الحركات والصناديق بنجاح")),
       );

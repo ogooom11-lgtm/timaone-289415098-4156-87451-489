@@ -216,6 +216,7 @@ class _PendingRecordsPageState extends State<PendingRecordsPage> {
 
     // 1) فئات المبلغ الأول — مقيدة بمخزون الصندوق
     final stock1 = await CurrencyDenoms.loadStock(currency1);
+    if (!mounted) return;
     final counts1 = await showDialog<Map<double, int>>(
       context: context,
       barrierDismissible: false,
@@ -249,6 +250,7 @@ class _PendingRecordsPageState extends State<PendingRecordsPage> {
         return;
       }
       final stock2 = await CurrencyDenoms.loadStock(currency2);
+      if (!mounted) return;
       counts2 = await showDialog<Map<double, int>>(
         context: context,
         barrierDismissible: false,
