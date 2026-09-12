@@ -182,6 +182,25 @@ class CurrencyDenoms {
         out[cur.id] = OldStockEffect(codeCounts.values.first, true);
       }
     }
+    // فئات الأجور في الحركة المرسلة — واردة هي أيضاً، وتُدمج مع المستلم
+    // إن كانت عملتها مطابقة لعملة الاستلام.
+    if (tx.type.contains('مرسلة')) {
+      final feeCounts = _allCodeCounts(note, 'فئات الأجور لـ');
+      final feesCur = byId(tx.feesCurrencyId);
+      if (feesCur != null && feeCounts.isNotEmpty) {
+        final fc = feeCounts[feesCur.code] ?? feeCounts.values.first;
+        if (fc.isNotEmpty) {
+          final existing = out[feesCur.id];
+          if (existing != null) {
+            final merged = Map<double, int>.from(existing.counts);
+            fc.forEach((d, c) => merged[d] = (merged[d] ?? 0) + c);
+            out[feesCur.id] = OldStockEffect(merged, true);
+          } else {
+            out[feesCur.id] = OldStockEffect(fc, true);
+          }
+        }
+      }
+    }
     return out;
   }
 

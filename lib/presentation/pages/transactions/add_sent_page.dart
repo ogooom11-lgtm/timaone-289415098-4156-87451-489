@@ -71,6 +71,9 @@ class _AddSentPageState extends State<AddSentPage> {
       } else {
         _dateController.text = DateFormat('yyyy-MM-dd').format(DateTime.now());
       }
+      // حساب المبلغ المرسل تلقائياً كلما تغيّر المستلم أو سعر الصرف.
+      _receivedAmountController.addListener(_recalcSent);
+      _exchangeRateController.addListener(_recalcSent);
     });
   }
 
@@ -85,6 +88,27 @@ class _AddSentPageState extends State<AddSentPage> {
         .where((e) => e.value > 0)
         .map((e) => "${e.key.toStringAsFixed(0)}x${e.value}")
         .join(", ");
+  }
+
+  String _trimNum(double v) {
+    if (v.isNaN || v.isInfinite) return "";
+    var s = v.toStringAsFixed(2);
+    if (s.contains('.')) {
+      s = s.replaceFirst(RegExp(r'0+$'), '');
+      s = s.replaceFirst(RegExp(r'\.$'), '');
+    }
+    return s;
+  }
+
+  /// يحسب المبلغ المرسل تلقائياً من المستلم وسعر الصرف عند تفعيل التحويل:
+  /// ضرب = المستلم × السعر، قص = المستلم ÷ السعر.
+  void _recalcSent() {
+    if (!_needsExchange) return;
+    final received = double.tryParse(_receivedAmountController.text.trim());
+    final rate = double.tryParse(_exchangeRateController.text.trim());
+    if (received == null || rate == null || rate == 0) return;
+    final result = _operation == "ضرب" ? received * rate : received / rate;
+    _sentAmountController.text = _trimNum(result);
   }
 
   Future<void> _save() async {
@@ -121,8 +145,30 @@ class _AddSentPageState extends State<AddSentPage> {
     );
     if (counts1 == null) return; // تراجع المستخدم
 
-    final denomNote =
+    // فئات الأجور والعمولة — تُضاف للصندوق هي أيضاً مع تحديد فئاتها.
+    final feesCur = _currencies.firstWhere((c) => c.id == _feesCurrencyId);
+    Map<double, int>? feeCounts;
+    if (feesVal > 0) {
+      if (!mounted) return;
+      feeCounts = await showDialog<Map<double, int>>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => DenomValidatorDialog(
+          targetAmount: feesVal,
+          currency: feesCur,
+          title: "تفصيل فئات الأجور والعمولة",
+          mode: DenomDialogMode.inflow,
+        ),
+      );
+      if (feeCounts == null) return; // تراجع المستخدم
+    }
+
+    String denomNote =
         "[الفئات المستلمة للحوالة لـ ${currency1.code}: ${_formatCounts(counts1)}]";
+    if (feeCounts != null && feeCounts.isNotEmpty) {
+      denomNote +=
+          "\n[فئات الأجور لـ ${feesCur.code}: ${_formatCounts(feeCounts)}]";
+    }
 
     // عكس أثر الفئات القديمة قبل تطبيق الجديدة (تعديل صحيح بالفرق).
     if (_isEditMode) {
@@ -132,6 +178,9 @@ class _AddSentPageState extends State<AddSentPage> {
       );
     }
     await CurrencyDenoms.addStock(currency1, counts1);
+    if (feeCounts != null) {
+      await CurrencyDenoms.addStock(feesCur, feeCounts);
+    }
 
     if (_isEditMode) {
       final oldTx = widget.transaction!;
@@ -373,8 +422,10 @@ class _AddSentPageState extends State<AddSentPage> {
                       amountController: _receivedAmountController,
                       amountLabel: "مبلغ الاستلام",
                       selectedCurrencyId: _receivedCurrencyId,
-                      onCurrencyChanged: (value) =>
-                          setState(() => _receivedCurrencyId = value),
+                      onCurrencyChanged: (value) {
+                        setState(() => _receivedCurrencyId = value);
+                        _recalcSent();
+                      },
                     ),
                     const SizedBox(height: 16),
 
@@ -430,8 +481,10 @@ class _AddSentPageState extends State<AddSentPage> {
                             child: Text("ضرب (تضرب)"),
                           ),
                         ],
-                        onChanged: (value) =>
-                            setState(() => _operation = value ?? "قص"),
+                        onChanged: (value) {
+                          setState(() => _operation = value ?? "قص");
+                          _recalcSent();
+                        },
                       ),
                       const SizedBox(height: 16),
                     ],
@@ -449,8 +502,10 @@ class _AddSentPageState extends State<AddSentPage> {
                       amountController: _sentAmountController,
                       amountLabel: "مبلغ الإرسال",
                       selectedCurrencyId: _sentCurrencyId,
-                      onCurrencyChanged: (value) =>
-                          setState(() => _sentCurrencyId = value),
+                      onCurrencyChanged: (value) {
+                        setState(() => _sentCurrencyId = value);
+                        _recalcSent();
+                      },
                     ),
                     const SizedBox(height: 16),
 
