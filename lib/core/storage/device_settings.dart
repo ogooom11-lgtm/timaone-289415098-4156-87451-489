@@ -229,4 +229,21 @@ class DeviceSettings {
     }
     await _write(data);
   }
+
+  // --- Receipt (إيصال الطباعة) preferences ---
+  /// الإعدادات الكاملة للإيصال كما حفظتها `ReceiptSettings.save()`.
+  static Future<Map<String, dynamic>> receiptSettings() async {
+    final data = await _read();
+    final value = data['receiptSettings'];
+    if (value is Map) {
+      return Map<String, dynamic>.from(value);
+    }
+    return <String, dynamic>{};
+  }
+
+  static Future<void> saveReceiptSettings(Map<String, dynamic> value) async {
+    final data = await _read();
+    data['receiptSettings'] = value;
+    await _write(data);
+  }
 }

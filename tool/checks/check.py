@@ -205,6 +205,124 @@ def check_imports():
     return errs, f'imports satisfy all {len(dart_files())} files'
 
 
+PROJECT_CLASS_RE = re.compile(r'\bclass\s+(\w+)')
+
+
+def project_classes():
+    """Map every project class name to the file that declares it."""
+    out = {}
+    for f in dart_files():
+        if f.endswith('.g.dart'):
+            continue
+        src = open(f, encoding='utf-8').read()
+        for m in PROJECT_CLASS_RE.finditer(src):
+            out.setdefault(m.group(1), f)
+    return out
+
+
+def constructor_params(src, cls):
+    """Named parameters accepted by any constructor of `cls` (plus inherited)."""
+    names = set()
+    for m in re.finditer(r'(?:const\s+|factory\s+)?%s\s*(?:\.\w+)?\s*\(' % cls, src):
+        i = m.end() - 1
+        depth, seg, segs = 0, '', []
+        while i < len(src):
+            c = src[i]
+            if c == '(':
+                depth += 1
+            elif c == ')':
+                depth -= 1
+                if depth == 0:
+                    segs.append(seg)
+                    break
+            if depth == 1 and c == ',' and not _in_string(src, i):
+                segs.append(seg)
+                seg = ''
+                i += 1
+                continue
+            seg += c
+            i += 1
+        for seg in segs:
+            seg = seg.strip()
+            for pm in re.finditer(r'(?:required\s+)?(?:this\.|super\.)(\w+)', seg):
+                names.add(pm.group(1))
+            pm = re.search(
+                r'(?:required\s+)?[\w<>,\s\?\.]+?\s(\w+)\s*$', seg)
+            if pm and not seg.startswith('this.') and not seg.startswith(
+                    'super.'):
+                names.add(pm.group(1))
+    names.add('key')
+    return names
+
+
+def _in_string(src, idx):
+    quote = None
+    i = 0
+    while i < idx:
+        c = src[i]
+        if quote:
+            if c == '\\':
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+        elif c in '\'\"':
+            quote = c
+        i += 1
+    return quote is not None
+
+
+def named_args_at(src, start):
+    """Named argument keys of the call whose '(' sits at `start`."""
+    i, depth = start, 0
+    keys, seg_start = [], start + 1
+    out = []
+    while i < len(src):
+        c = src[i]
+        if c in '([{':
+            depth += 1
+        elif c in ')]}':
+            depth -= 1
+            if depth == 0:
+                out.append(src[seg_start:i])
+                break
+        elif c == ',' and depth == 1 and not _in_string(src, i):
+            out.append(src[seg_start:i])
+            seg_start = i + 1
+        i += 1
+    for seg in out:
+        m = re.match(r'\s*(\w+)\s*:', seg)
+        if m:
+            keys.append(m.group(1))
+    return keys
+
+
+def check_widget_params():
+    """Every named argument on a project class must be a real parameter."""
+    classes = project_classes()
+    cache = {}
+    errs = []
+    for f in dart_files():
+        if f.endswith('.g.dart'):
+            continue
+        src = open(f, encoding='utf-8').read()
+        for cls in set(re.findall(r'\b(\w+)\s*\(', src)):
+            if cls not in classes:
+                continue
+            if cls not in cache:
+                owner = open(classes[cls], encoding='utf-8').read()
+                cache[cls] = constructor_params(owner, cls)
+            known = cache[cls]
+            for m in re.finditer(r'(?<![\w.])%s\s*\(' % cls, src):
+                open_paren = src.index('(', m.end() - 1)
+                for arg in named_args_at(src, open_paren):
+                    if arg not in known:
+                        ln = src[:m.start()].count('\n') + 1
+                        errs.append(
+                            f'{rel(f)}:{ln}: {cls} has no parameter "{arg}"')
+    return errs, f'{len(classes)} project classes checked'
+
+
 def check_conventions():
     """Guard the specific mistakes that broke the Windows build before."""
     errs = []
@@ -232,6 +350,7 @@ def main():
         ('brackets', check_brackets),
         ('symbols', check_symbols),
         ('imports', check_imports),
+        ('params', check_widget_params),
         ('conventions', check_conventions),
     ]
     failed = False

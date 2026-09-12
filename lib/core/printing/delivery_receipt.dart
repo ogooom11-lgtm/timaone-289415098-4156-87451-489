@@ -1,4 +1,6 @@
-import 'package:flutter/material.dart';
+import 'dart:io';
+import 'dart:typed_data';
+
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart' hide TextDirection;
 import 'package:pdf/pdf.dart';
@@ -7,11 +9,13 @@ import 'package:printing/printing.dart';
 
 import '../storage/app_database.dart';
 import '../storage/device_settings.dart';
-import '../theme/app_colors.dart';
-import '../theme/app_theme.dart';
 import '../utils/currency_denoms.dart';
+import 'receipt_settings.dart';
 
 /// بيانات إيصال التسليم.
+///
+/// ملاحظة: الملاحظة [note] لا تُطبع إلا إذا كتبها المستخدم في نافذة
+/// الطباعة، والحالة و«المسلّم» مطفأتان افتراضياً من إعدادات الإيصال.
 class DeliveryReceiptData {
   final String beneficiary;
   final double amount;
@@ -27,6 +31,7 @@ class DeliveryReceiptData {
   final String note;
   final String createdBy;
   final String branch;
+  final String officeName;
   final int? transactionId;
 
   const DeliveryReceiptData({
@@ -44,6 +49,7 @@ class DeliveryReceiptData {
     this.note = '',
     this.createdBy = '',
     this.branch = '',
+    this.officeName = '',
     this.transactionId,
   });
 
@@ -66,17 +72,71 @@ class DeliveryReceiptData {
       currencyName: CurrencyDenoms.displayName(currency1),
       amount2: tx.targetAmount,
       currencyCode2: currency2?.code,
-      currencyName2:
-      currency2 == null ? null : CurrencyDenoms.displayName(currency2),
+      currencyName2: currency2 == null
+          ? null
+          : CurrencyDenoms.displayName(currency2),
       denoms1: denoms1,
       denoms2: denoms2,
-      status: statusOverride ??
-          (tx.status.isNotEmpty ? tx.status : 'تم التسليم'),
+      status: statusOverride ?? (tx.status.isNotEmpty ? tx.status : 'تم التسليم'),
       dateTime: DateTime.now(),
       note: _cleanNote(tx.note),
       createdBy: createdBy.isNotEmpty ? createdBy : tx.createdByName,
       branch: branch,
       transactionId: tx.id,
+    );
+  }
+
+  /// يبني بيانات إيصال من حركة محفوظة في أي وقت (إعادة طباعة).
+  ///
+  /// الفئات تُستخرج من ملاحظة الحركة إن كانت مسجّلة فيها.
+  factory DeliveryReceiptData.fromStoredTransaction({
+    required Transaction tx,
+    required Currency currency1,
+    Currency? currency2,
+    String createdBy = '',
+    String branch = '',
+  }) {
+    return DeliveryReceiptData.fromTransaction(
+      tx: tx,
+      currency1: currency1,
+      currency2: currency2,
+      denoms1: CurrencyDenoms.parseCounts(
+        CurrencyDenoms.extractDeliveredDenomsNote(tx.note),
+      ),
+      denoms2: CurrencyDenoms.parseCounts(
+        CurrencyDenoms.extractDeliveredDenomsNote2(tx.note),
+      ),
+      createdBy: createdBy,
+      branch: branch,
+    );
+  }
+
+  DeliveryReceiptData copyWith({
+    String? beneficiary,
+    String? status,
+    DateTime? dateTime,
+    String? note,
+    String? createdBy,
+    String? branch,
+    String? officeName,
+  }) {
+    return DeliveryReceiptData(
+      beneficiary: beneficiary ?? this.beneficiary,
+      amount: amount,
+      currencyCode: currencyCode,
+      currencyName: currencyName,
+      amount2: amount2,
+      currencyCode2: currencyCode2,
+      currencyName2: currencyName2,
+      denoms1: denoms1,
+      denoms2: denoms2,
+      status: status ?? this.status,
+      dateTime: dateTime ?? this.dateTime,
+      note: note ?? this.note,
+      createdBy: createdBy ?? this.createdBy,
+      branch: branch ?? this.branch,
+      officeName: officeName ?? this.officeName,
+      transactionId: transactionId,
     );
   }
 
@@ -91,6 +151,10 @@ class DeliveryReceiptData {
   }
 }
 
+/// بناء ملف الإيصال وإرساله إلى الطابعة.
+///
+/// هذه الطبقة لا تحتوي أي ودجات: الحوارات (خيارات الطباعة والعدّاد) في
+/// `lib/presentation/widgets/receipt_print_dialog.dart`.
 class DeliveryReceiptService {
   DeliveryReceiptService._();
 
@@ -115,23 +179,26 @@ class DeliveryReceiptService {
   }
 
   static String _fmtDate(DateTime d) {
-    return DateFormat('yyyy/MM/dd HH:mm:ss').format(d.toLocal());
+    return DateFormat('yyyy/MM/dd  HH:mm').format(d.toLocal());
   }
 
-  static String _denomsLines(Map<double, int> counts, String code) {
-    final parts = <String>[];
-    final keys = counts.keys.toList()..sort((a, b) => b.compareTo(a));
-    for (final d in keys) {
-      final c = counts[d] ?? 0;
-      if (c <= 0) continue;
-      final label =
+  static String _fmtDenom(double d) =>
       d == d.roundToDouble() ? d.toInt().toString() : d.toString();
-      parts.add('$label $code × $c');
-    }
-    return parts.isEmpty ? '—' : parts.join('\n');
-  }
 
-  static Future<Uint8List?> _logoBytes() async {
+  /// يقرأ الشعار: الصورة المخصّصة إن وُجدت، وإلا شعار تيما المدمج.
+  static Future<Uint8List?> _logoBytes(ReceiptSettings settings) async {
+    if (!settings.showLogo) return null;
+
+    final path = settings.logoPath;
+    if (path != null && path.isNotEmpty) {
+      try {
+        final file = File(path);
+        if (await file.exists()) return await file.readAsBytes();
+      } catch (_) {
+        // صورة مفقودة أو غير مقروءة — نرجع للشعار المدمج.
+      }
+    }
+
     try {
       final data = await rootBundle.load('assets/images/tima_logo.png');
       return data.buffer.asUint8List();
@@ -140,34 +207,46 @@ class DeliveryReceiptService {
     }
   }
 
-  static Future<Uint8List> buildPdf(DeliveryReceiptData data) async {
+  static PdfPageFormat _pageFormat(ReceiptSettings settings) {
+    final base = PdfPageFormat.roll80;
+    if (settings.paperWidthMm >= 80) return base;
+    // 58mm تُشتق من قياس 80mm المعتمد بدل ثوابت قد لا تتوفر في الحزمة.
+    return PdfPageFormat(base.width * 58 / 80, base.height);
+  }
+
+  /// يبني ملف PDF للإيصال حسب الإعدادات المعتمدة.
+  static Future<Uint8List> buildPdf(
+    DeliveryReceiptData data,
+    ReceiptSettings settings,
+  ) async {
     await _ensureFonts();
     final font = _fontRegular!;
     final bold = _fontBold!;
 
     final doc = pw.Document();
-    final logo = await _logoBytes();
-    final logoImage = logo == null ? null : pw.MemoryImage(logo);
+    final logoBytes = await _logoBytes(settings);
+    final logoImage = logoBytes == null ? null : pw.MemoryImage(logoBytes);
 
-    final borderColor = PdfColor.fromInt(0xFF222222);
+    final ink = PdfColor.fromInt(0xFF1B1B1B);
     final green = PdfColor.fromInt(0xFF0B5D4B);
-    final gold = PdfColor.fromInt(0xFFE6B84A);
+    final gold = PdfColor.fromInt(0xFFB8860B);
+    final line = PdfColor.fromInt(0xFFB9B9B9);
+    final muted = PdfColor.fromInt(0xFF6B6B6B);
 
-    pw.Widget row(String label, String value, {bool strong = false}) {
+    final compact = settings.paperWidthMm <= 58;
+    final labelWidth = compact ? 52.0 : 66.0;
+
+    pw.Widget infoRow(String label, String value, {bool strong = false}) {
       return pw.Padding(
-        padding: const pw.EdgeInsets.symmetric(vertical: 5),
+        padding: const pw.EdgeInsets.symmetric(vertical: 3),
         child: pw.Row(
           crossAxisAlignment: pw.CrossAxisAlignment.start,
           children: [
             pw.SizedBox(
-              width: 78,
+              width: labelWidth,
               child: pw.Text(
                 label,
-                style: pw.TextStyle(
-                  font: bold,
-                  fontSize: 11,
-                  color: green,
-                ),
+                style: pw.TextStyle(font: bold, fontSize: 9.5, color: muted),
                 textDirection: pw.TextDirection.rtl,
               ),
             ),
@@ -176,9 +255,9 @@ class DeliveryReceiptService {
                 value,
                 style: pw.TextStyle(
                   font: strong ? bold : font,
-                  fontSize: 12,
+                  fontSize: strong ? 11 : 10.5,
+                  color: ink,
                 ),
-                textAlign: pw.TextAlign.right,
                 textDirection: pw.TextDirection.rtl,
               ),
             ),
@@ -187,178 +266,337 @@ class DeliveryReceiptService {
       );
     }
 
-    pw.Widget divider() => pw.Container(
-      margin: const pw.EdgeInsets.symmetric(vertical: 3),
-      height: 1,
-      color: PdfColors.grey400,
+    pw.Widget hairline({bool dashed = false}) => pw.Container(
+      margin: const pw.EdgeInsets.symmetric(vertical: 4),
+      height: dashed ? 1.2 : 0.8,
+      color: line,
     );
+
+    pw.Widget sectionTitle(String text) => pw.Padding(
+      padding: const pw.EdgeInsets.only(bottom: 3),
+      child: pw.Text(
+        text,
+        style: pw.TextStyle(font: bold, fontSize: 9.5, color: green),
+        textDirection: pw.TextDirection.rtl,
+      ),
+    );
+
+    // --- الترويسة حسب موضع الشعار ---
+    pw.Widget titleBlock() => pw.Column(
+      crossAxisAlignment: settings.logoPosition ==
+              ReceiptLogoPosition.topCenter
+          ? pw.CrossAxisAlignment.center
+          : pw.CrossAxisAlignment.start,
+      children: [
+        if (settings.showOfficeName && data.officeName.isNotEmpty)
+          pw.Text(
+            data.officeName,
+            style: pw.TextStyle(font: bold, fontSize: 10.5, color: gold),
+            textDirection: pw.TextDirection.rtl,
+          ),
+        pw.SizedBox(height: 1),
+        pw.Text(
+          settings.title,
+          style: pw.TextStyle(font: bold, fontSize: 15, color: green),
+          textDirection: pw.TextDirection.rtl,
+        ),
+        if (settings.showTransactionId && data.transactionId != null)
+          pw.Text(
+            'رقم العملية: #${data.transactionId}',
+            style: pw.TextStyle(font: font, fontSize: 8.5, color: muted),
+            textDirection: pw.TextDirection.rtl,
+          ),
+      ],
+    );
+
+    pw.Widget logoBox() => pw.Container(
+      width: settings.logoWidth,
+      height: settings.logoWidth * 0.62,
+      child: pw.Image(logoImage!, fit: pw.BoxFit.contain),
+    );
+
+    pw.Widget header() {
+      final hasLogo = logoImage != null;
+      if (!hasLogo || settings.logoPosition == ReceiptLogoPosition.bottom) {
+        return titleBlock();
+      }
+      if (settings.logoPosition == ReceiptLogoPosition.topCenter) {
+        return pw.Column(
+          crossAxisAlignment: pw.CrossAxisAlignment.center,
+          children: [
+            logoBox(),
+            pw.SizedBox(height: 4),
+            titleBlock(),
+          ],
+        );
+      }
+      final isRight = settings.logoPosition == ReceiptLogoPosition.topRight;
+      // داخل اتجاه RTL العنصر الأول يقف على اليمين.
+      return pw.Row(
+        crossAxisAlignment: pw.CrossAxisAlignment.center,
+        children: [
+          if (isRight) logoBox(),
+          pw.SizedBox(width: 8),
+          pw.Expanded(child: titleBlock()),
+          if (!isRight) logoBox(),
+        ],
+      );
+    }
+
+    // --- صندوق المبلغ البارز ---
+    pw.Widget amountBox(double amount, String label, String unit) {
+      return pw.Container(
+        padding: pw.EdgeInsets.symmetric(
+          horizontal: compact ? 6 : 9,
+          vertical: compact ? 5 : 7,
+        ),
+        decoration: pw.BoxDecoration(
+          border: pw.Border.all(color: green, width: 0.9),
+          borderRadius: pw.BorderRadius.circular(4),
+        ),
+        child: pw.Row(
+          crossAxisAlignment: pw.CrossAxisAlignment.center,
+          children: [
+            pw.Expanded(
+              child: pw.Column(
+                crossAxisAlignment: pw.CrossAxisAlignment.start,
+                children: [
+                  pw.Text(
+                    label,
+                    style: pw.TextStyle(font: font, fontSize: 8.5, color: muted),
+                    textDirection: pw.TextDirection.rtl,
+                  ),
+                  pw.Text(
+                    unit,
+                    style: pw.TextStyle(font: bold, fontSize: 9.5, color: green),
+                    textDirection: pw.TextDirection.rtl,
+                  ),
+                ],
+              ),
+            ),
+            pw.Text(
+              _fmtAmount(amount),
+              style: pw.TextStyle(
+                font: bold,
+                fontSize: compact ? 14 : 16,
+                color: ink,
+              ),
+              textDirection: pw.TextDirection.rtl,
+            ),
+          ],
+        ),
+      );
+    }
+
+    // --- جدول تفصيل الفئات ---
+    pw.Widget denomsTable(Map<double, int> counts, String code) {
+      final keys = counts.keys.toList()..sort((a, b) => b.compareTo(a));
+      final rows = <pw.TableRow>[];
+
+      pw.TextStyle headStyle() => pw.TextStyle(
+        font: bold,
+        fontSize: 9,
+        color: green,
+      );
+      pw.TextStyle cellStyle({bool strong = false}) => pw.TextStyle(
+        font: strong ? bold : font,
+        fontSize: 9.5,
+        color: ink,
+      );
+
+      pw.Widget cell(String text, pw.TextStyle style) => pw.Padding(
+        padding: const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 2.5),
+        child: pw.Text(
+          text,
+          style: style,
+          textDirection: pw.TextDirection.rtl,
+        ),
+      );
+
+      rows.add(
+        pw.TableRow(
+          decoration: pw.BoxDecoration(color: PdfColor.fromInt(0xFFF1F1F1)),
+          children: [
+            cell('الفئة ($code)', headStyle()),
+            cell('العدد', headStyle()),
+            cell('القيمة', headStyle()),
+          ],
+        ),
+      );
+
+      var total = 0.0;
+      for (final denom in keys) {
+        final count = counts[denom] ?? 0;
+        if (count <= 0) continue;
+        final value = denom * count;
+        total += value;
+        rows.add(
+          pw.TableRow(
+            children: [
+              cell(_fmtDenom(denom), cellStyle()),
+              cell('$count', cellStyle()),
+              cell(_fmtAmount(value), cellStyle()),
+            ],
+          ),
+        );
+      }
+
+      rows.add(
+        pw.TableRow(
+          children: [
+            cell('المجموع', headStyle()),
+            cell('', headStyle()),
+            cell(_fmtAmount(total), headStyle()),
+          ],
+        ),
+      );
+
+      return pw.Table(
+        columnWidths: <int, pw.TableColumnWidth>{
+          0: pw.FlexColumnWidth(2.2),
+          1: pw.FlexColumnWidth(1.1),
+          2: pw.FlexColumnWidth(1.9),
+        },
+        border: pw.TableBorder.all(color: line, width: 0.5),
+        children: rows,
+      );
+    }
+
+    final hasDenoms1 = data.denoms1.values.any((v) => v > 0);
+    final hasDenoms2 =
+        data.denoms2 != null && data.denoms2!.values.any((v) => v > 0);
+    final hasAmount2 =
+        data.amount2 != null && data.amount2! > 0 && data.currencyCode2 != null;
+    final note = data.note.trim();
 
     doc.addPage(
       pw.Page(
-        pageFormat: PdfPageFormat.roll80,
-        margin: const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+        pageFormat: _pageFormat(settings),
+        margin: pw.EdgeInsets.symmetric(
+          horizontal: compact ? 6 : 8,
+          vertical: compact ? 8 : 10,
+        ),
         theme: pw.ThemeData.withFont(base: font, bold: bold),
         build: (context) {
           return pw.Directionality(
             textDirection: pw.TextDirection.rtl,
             child: pw.Container(
               decoration: pw.BoxDecoration(
-                border: pw.Border.all(color: borderColor, width: 1.3),
+                border: pw.Border.all(color: ink, width: 1.1),
+                borderRadius: pw.BorderRadius.circular(3),
               ),
-              padding: const pw.EdgeInsets.fromLTRB(10, 10, 10, 12),
+              padding: pw.EdgeInsets.fromLTRB(
+                compact ? 7 : 10,
+                compact ? 7 : 10,
+                compact ? 7 : 10,
+                compact ? 8 : 11,
+              ),
               child: pw.Column(
                 crossAxisAlignment: pw.CrossAxisAlignment.stretch,
                 children: [
-                  // Header: title + logo
-                  pw.Row(
-                    crossAxisAlignment: pw.CrossAxisAlignment.center,
-                    children: [
-                      pw.Expanded(
-                        child: pw.Column(
-                          crossAxisAlignment: pw.CrossAxisAlignment.start,
-                          children: [
-                            pw.Text(
-                              'إيصال تسليم',
-                              style: pw.TextStyle(
-                                font: bold,
-                                fontSize: 16,
-                                color: green,
-                              ),
-                            ),
-                            if (data.transactionId != null)
-                              pw.Text(
-                                'رقم العملية: ${data.transactionId}',
-                                style: pw.TextStyle(
-                                  font: font,
-                                  fontSize: 9,
-                                  color: PdfColors.grey700,
-                                ),
-                              ),
-                          ],
-                        ),
-                      ),
-                      if (logoImage != null)
-                        pw.Container(
-                          width: 56,
-                          height: 36,
-                          child: pw.Image(logoImage, fit: pw.BoxFit.contain),
-                        )
-                      else
-                        pw.Container(
-                          padding: const pw.EdgeInsets.symmetric(
-                            horizontal: 8,
-                            vertical: 6,
-                          ),
-                          decoration: pw.BoxDecoration(
-                            color: green,
-                            borderRadius: pw.BorderRadius.circular(4),
-                          ),
-                          child: pw.Text(
-                            'تيما',
-                            style: pw.TextStyle(
-                              font: bold,
-                              color: gold,
-                              fontSize: 12,
-                            ),
-                          ),
-                        ),
-                    ],
-                  ),
-                  divider(),
-                  row('الاسم :', data.beneficiary, strong: true),
-                  divider(),
-                  row(
-                    'المبلغ :',
-                    '${_fmtAmount(data.amount)}   ${data.currencyName.isNotEmpty ? data.currencyName : data.currencyCode}',
-                    strong: true,
-                  ),
-                  if (data.amount2 != null &&
-                      data.amount2! > 0 &&
-                      data.currencyCode2 != null) ...[
-                    divider(),
-                    row(
-                      'المبلغ 2 :',
-                      '${_fmtAmount(data.amount2!)}   ${data.currencyName2 ?? data.currencyCode2}',
-                      strong: true,
-                    ),
-                  ],
-                  divider(),
-                  row('الحالة:', data.status),
-                  divider(),
-                  row('التاريخ:', _fmtDate(data.dateTime)),
-                  if (data.createdBy.isNotEmpty) ...[
-                    divider(),
-                    row('المسلّم:', data.createdBy),
-                  ],
-                  if (data.branch.isNotEmpty) ...[
-                    divider(),
-                    row('الفرع:', data.branch),
-                  ],
-                  divider(),
-                  pw.Text(
-                    'تفصيل الفئات:',
-                    style: pw.TextStyle(
-                      font: bold,
-                      fontSize: 11,
-                      color: green,
-                    ),
-                    textDirection: pw.TextDirection.rtl,
-                  ),
+                  header(),
+                  hairline(),
+
+                  // بيانات الحركة
+                  infoRow('الاسم :', data.beneficiary, strong: true),
+                  if (settings.showDateTime)
+                    infoRow('التاريخ :', _fmtDate(data.dateTime)),
+                  if (settings.showStatus && data.status.isNotEmpty)
+                    infoRow('الحالة :', data.status),
+                  if (settings.showCreatedBy && data.createdBy.isNotEmpty)
+                    infoRow('المسلّم :', data.createdBy),
+                  if (settings.showBranch && data.branch.isNotEmpty)
+                    infoRow('المكتب :', data.branch),
+
                   pw.SizedBox(height: 4),
-                  pw.Text(
-                    _denomsLines(data.denoms1, data.currencyCode),
-                    style: pw.TextStyle(font: font, fontSize: 11),
-                    textDirection: pw.TextDirection.rtl,
-                    textAlign: pw.TextAlign.right,
+                  amountBox(
+                    data.amount,
+                    'المبلغ',
+                    data.currencyName.isNotEmpty
+                        ? data.currencyName
+                        : data.currencyCode,
                   ),
-                  if (data.denoms2 != null &&
-                      data.currencyCode2 != null &&
-                      data.denoms2!.values.any((v) => v > 0)) ...[
-                    pw.SizedBox(height: 6),
-                    pw.Text(
-                      'فئات المبلغ 2 (${data.currencyCode2}):',
-                      style: pw.TextStyle(
-                        font: bold,
-                        fontSize: 11,
-                        color: green,
-                      ),
-                      textDirection: pw.TextDirection.rtl,
-                    ),
+                  if (hasAmount2) ...[
                     pw.SizedBox(height: 4),
-                    pw.Text(
-                      _denomsLines(data.denoms2!, data.currencyCode2!),
-                      style: pw.TextStyle(font: font, fontSize: 11),
-                      textDirection: pw.TextDirection.rtl,
-                      textAlign: pw.TextAlign.right,
+                    amountBox(
+                      data.amount2!,
+                      'المبلغ الثاني',
+                      (data.currencyName2 ?? data.currencyCode2)!,
                     ),
                   ],
-                  divider(),
-                  row(
-                    'ملاحظة:',
-                    data.note.isEmpty ? 'تم التسليم' : data.note,
-                  ),
-                  pw.SizedBox(height: 12),
+
+                  // تفصيل العملات
+                  if (settings.showDenominations && (hasDenoms1 || hasDenoms2)) ...[
+                    hairline(),
+                    sectionTitle('تفصيل العملات'),
+                    pw.SizedBox(height: 2),
+                    if (hasDenoms1) denomsTable(data.denoms1, data.currencyCode),
+                    if (hasDenoms2) ...[
+                      pw.SizedBox(height: 5),
+                      sectionTitle(
+                        'فئات المبلغ الثاني (${data.currencyCode2})',
+                      ),
+                      pw.SizedBox(height: 2),
+                      denomsTable(data.denoms2!, data.currencyCode2!),
+                    ],
+                  ],
+
+                  // ملاحظة المستخدم — تُطبع فقط إذا كُتبت
+                  if (note.isNotEmpty) ...[
+                    hairline(),
+                    sectionTitle('ملاحظة'),
+                    pw.Text(
+                      note,
+                      style: pw.TextStyle(font: font, fontSize: 10, color: ink),
+                      textDirection: pw.TextDirection.rtl,
+                      softWrap: true,
+                    ),
+                  ],
+
+                  pw.SizedBox(height: 10),
                   pw.Center(
-                    child: pw.Text(
-                      'تم التسليم',
-                      style: pw.TextStyle(
-                        font: bold,
-                        fontSize: 13,
-                        color: green,
+                    child: pw.Container(
+                      padding: const pw.EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 3.5,
+                      ),
+                      decoration: pw.BoxDecoration(
+                        border: pw.Border.all(color: green, width: 0.9),
+                        borderRadius: pw.BorderRadius.circular(3),
+                      ),
+                      child: pw.Text(
+                        data.status.isEmpty ? 'تم التسليم' : data.status,
+                        style: pw.TextStyle(
+                          font: bold,
+                          fontSize: 11.5,
+                          color: green,
+                        ),
+                        textDirection: pw.TextDirection.rtl,
                       ),
                     ),
                   ),
-                  pw.SizedBox(height: 4),
-                  pw.Center(
-                    child: pw.Text(
-                      'شكراً لتعاملكم مع تيما',
-                      style: pw.TextStyle(
-                        font: font,
-                        fontSize: 9,
-                        color: PdfColors.grey700,
+
+                  if (settings.showFooter && settings.footerMessage.isNotEmpty) ...[
+                    pw.SizedBox(height: 5),
+                    pw.Center(
+                      child: pw.Text(
+                        settings.footerMessage,
+                        style: pw.TextStyle(
+                          font: font,
+                          fontSize: 8.5,
+                          color: muted,
+                        ),
+                        textDirection: pw.TextDirection.rtl,
                       ),
                     ),
-                  ),
+                  ],
+
+                  if (settings.showLogo &&
+                      logoImage != null &&
+                      settings.logoPosition == ReceiptLogoPosition.bottom) ...[
+                    pw.SizedBox(height: 8),
+                    pw.Center(child: logoBox()),
+                  ],
                 ],
               ),
             ),
@@ -370,207 +608,42 @@ class DeliveryReceiptService {
     return doc.save();
   }
 
-  /// بعد نجاح التسليم: يسأل هل تريد طباعة إيصال؟
-  static Future<void> offerPrintAfterDelivery(
-      BuildContext context,
-      DeliveryReceiptData data,
-      ) async {
-    if (!context.mounted) return;
+  /// يبني الإيصال ويُرسله إلى الطابعة المختارة.
+  ///
+  /// `printer == null` يفتح حوار الطباعة/المعاينة الخاص بالنظام.
+  static Future<void> sendToPrinter({
+    required DeliveryReceiptData data,
+    required ReceiptSettings settings,
+    Printer? printer,
+    String? jobName,
+  }) async {
+    final bytes = await buildPdf(data, settings);
+    final name =
+        jobName ??
+        'delivery_receipt_${data.transactionId ?? DateTime.now().millisecondsSinceEpoch}';
 
-    final wantPrint = await showDialog<bool>(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) => Directionality(
-        textDirection: TextDirection.rtl,
-        child: AlertDialog(
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(AppDims.radiusLg),
-          ),
-          title: const Row(
-            children: [
-              Icon(Icons.check_circle, color: AppColors.success),
-              SizedBox(width: 8),
-              Expanded(child: Text('تمت العملية بنجاح')),
-            ],
-          ),
-          content: const Text(
-            'هل تريد طباعة إيصال التسليم؟',
-            style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('لا'),
-            ),
-            FilledButton.icon(
-              onPressed: () => Navigator.pop(ctx, true),
-              icon: const Icon(Icons.print),
-              label: const Text('نعم، طباعة'),
-            ),
-          ],
-        ),
-      ),
-    );
+    if (printer != null) {
+      await Printing.directPrintPdf(
+        printer: printer,
+        onLayout: (_) async => bytes,
+        name: name,
+      );
+      return;
+    }
 
-    if (wantPrint != true || !context.mounted) return;
-    await printReceipt(context, data);
+    await Printing.layoutPdf(onLayout: (_) async => bytes, name: name);
   }
 
-  /// اختيار طابعة / معاينة / طباعة + حفظ افتراضية.
-  static Future<void> printReceipt(
-      BuildContext context,
-      DeliveryReceiptData data,
-      ) async {
+  /// قائمة الطابعات المتاحة — قائمة فارغة عند تعذّر القراءة.
+  static Future<List<Printer>> availablePrinters() async {
     try {
-      final bytes = await buildPdf(data);
-      final defaultName = await DeviceSettings.defaultPrinterName();
-
-      List<Printer> printers = const [];
-      try {
-        printers = await Printing.listPrinters();
-      } catch (_) {
-        printers = const [];
-      }
-
-      if (!context.mounted) return;
-
-      // إذا توجد طابعات نعرض قائمة اختيار
-      if (printers.isNotEmpty) {
-        final selected = await showModalBottomSheet<_PrinterChoice>(
-          context: context,
-          isScrollControlled: true,
-          builder: (ctx) {
-            return Directionality(
-              textDirection: TextDirection.rtl,
-              child: SafeArea(
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      const Text(
-                        'اختر الطابعة',
-                        style: TextStyle(
-                          fontWeight: FontWeight.w900,
-                          fontSize: 16,
-                        ),
-                      ),
-                      if (defaultName != null) ...[
-                        const SizedBox(height: 6),
-                        Text(
-                          'الافتراضية: $defaultName',
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: AppColors.neutral600,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ],
-                      const SizedBox(height: 8),
-                      Flexible(
-                        child: ListView.builder(
-                          shrinkWrap: true,
-                          itemCount: printers.length,
-                          itemBuilder: (_, i) {
-                            final p = printers[i];
-                            final isDefault =
-                                defaultName != null && p.name == defaultName;
-                            return ListTile(
-                              leading: Icon(
-                                Icons.print,
-                                color: isDefault
-                                    ? AppColors.brandGold
-                                    : AppColors.brandGreen,
-                              ),
-                              title: Text(p.name),
-                              subtitle:
-                              isDefault ? const Text('طابعة افتراضية') : null,
-                              trailing: IconButton(
-                                tooltip: 'تعيين كافتراضية',
-                                icon: Icon(
-                                  isDefault ? Icons.star : Icons.star_border,
-                                  color: AppColors.brandGold,
-                                ),
-                                onPressed: () async {
-                                  await DeviceSettings.saveDefaultPrinterName(
-                                    p.name,
-                                  );
-                                  if (ctx.mounted) {
-                                    ScaffoldMessenger.of(ctx).showSnackBar(
-                                      SnackBar(
-                                        content: Text(
-                                          'تم تعيين "${p.name}" كطابعة افتراضية',
-                                        ),
-                                      ),
-                                    );
-                                  }
-                                },
-                              ),
-                              onTap: () => Navigator.pop(
-                                ctx,
-                                _PrinterChoice(printer: p),
-                              ),
-                            );
-                          },
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      OutlinedButton.icon(
-                        onPressed: () => Navigator.pop(
-                          ctx,
-                          const _PrinterChoice(useSystemDialog: true),
-                        ),
-                        icon: const Icon(Icons.preview),
-                        label: const Text('معاينة / حوار النظام'),
-                      ),
-                      TextButton(
-                        onPressed: () => Navigator.pop(ctx),
-                        child: const Text('إلغاء'),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            );
-          },
-        );
-
-        if (selected == null) return;
-
-        if (selected.printer != null) {
-          await Printing.directPrintPdf(
-            printer: selected.printer!,
-            onLayout: (_) async => bytes,
-            name: 'delivery_receipt_${data.transactionId ?? DateTime.now().millisecondsSinceEpoch}',
-          );
-          return;
-        }
-      }
-
-      // fallback / system dialog / preview
-      await Printing.layoutPdf(
-        onLayout: (_) async => bytes,
-        name:
-        'delivery_receipt_${data.transactionId ?? DateTime.now().millisecondsSinceEpoch}',
-      );
-    } catch (e) {
-      if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('تعذر الطباعة: $e')),
-      );
+      return await Printing.listPrinters();
+    } catch (_) {
+      return const [];
     }
   }
+
+  /// اسم المكتب المحفوظ في الإعدادات (يُطبع في الترويسة).
+  static Future<String> officeName() async =>
+      (await DeviceSettings.officeName()) ?? '';
 }
-
-class _PrinterChoice {
-  final Printer? printer;
-  final bool useSystemDialog;
-
-  const _PrinterChoice({
-    this.printer,
-    this.useSystemDialog = false,
-  });
-}
-
-

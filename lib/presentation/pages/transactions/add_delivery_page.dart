@@ -11,6 +11,7 @@ import '../../../core/utils/currency_denoms.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../widgets/app_ui.dart';
+import '../../widgets/receipt_print_dialog.dart';
 import '../../widgets/clipboard_words_panel.dart';
 import '../../widgets/denom_validator_dialog.dart';
 
@@ -336,7 +337,7 @@ class _AddDeliveryPageState extends State<AddDeliveryPage> {
           branch: widget.user.branch,
           transactionId: newId,
         );
-        await DeliveryReceiptService.offerPrintAfterDelivery(context, receipt);
+        await offerReceiptPrintAfterDelivery(context, receipt);
         if (!mounted) return;
         await _showUserDeliverySuccess(
           beneficiary: beneficiaryText,

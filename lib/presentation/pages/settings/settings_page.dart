@@ -12,6 +12,7 @@ import '../../../core/services/telegram_notifier.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../widgets/app_ui.dart';
+import '../../widgets/receipt_settings_card.dart';
 
 class SettingsPage extends StatefulWidget {
   final AppDatabase db;
@@ -758,6 +759,10 @@ class _SettingsPageState extends State<SettingsPage> {
                 ),
               ),
             ),
+            const SizedBox(height: 12),
+
+            // 2b. الطباعة والإيصالات — الطابعة المعتمدة والشعار والعدّاد
+            const ReceiptSettingsCard(),
             const SizedBox(height: 12),
 
             // 3. Currencies Card

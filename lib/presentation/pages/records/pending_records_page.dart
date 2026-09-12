@@ -11,6 +11,7 @@ import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/utils/currency_denoms.dart';
 import '../../widgets/app_ui.dart';
+import '../../widgets/receipt_print_dialog.dart';
 import '../../widgets/denom_validator_dialog.dart';
 import '../transactions/add_delivery_page.dart';
 
@@ -317,7 +318,7 @@ class _PendingRecordsPageState extends State<PendingRecordsPage> {
       branch: widget.user.branch,
       statusOverride: 'تم التسليم',
     );
-    await DeliveryReceiptService.offerPrintAfterDelivery(context, receipt);
+    await offerReceiptPrintAfterDelivery(context, receipt);
   }
 
   Future<void> _edit(Transaction transaction) async {
