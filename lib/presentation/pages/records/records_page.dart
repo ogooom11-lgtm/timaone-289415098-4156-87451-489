@@ -388,11 +388,14 @@ class _RecordsPageState extends State<RecordsPage> {
   Future<void> _cancel(Transaction transaction) async {
     if (!await _confirmCancel(transaction)) return;
     await _withBusy(transaction.id, () async {
+      // عكس أثر فئات الحركة على الصندوق: يحذف ما أُضيف / يُرجع ما خُصم.
+      // الحركة المعلقة (تسليم غير مُسلَّم) لا فئات لها فأثرها معدوم.
+      await CurrencyDenoms.reverseOldStock(transaction, _currencies);
       await widget.db.updateTransaction(
         transaction.id,
         const TransactionsCompanion(
           movementState: drift.Value('ملغية'),
-          status: drift.Value('الغاء'),
+          // تبقى الحالة الأصلية دون تجاوز لتُستعاد كما كانت عند التراجع.
         ),
       );
       await widget.db.insertEdit(
@@ -418,13 +421,31 @@ class _RecordsPageState extends State<RecordsPage> {
     );
   }
 
+  /// يُرجع الحالة المناسبة بعد التراجع عن الإلغاء: يبقيها إن كانت محفوظة
+  /// (إلغاء جديد)، أو يستعيدها حسب نوع الحركة إن كانت «الغاء» (إلغاء قديم).
+  String _statusAfterRevert(Transaction tx) {
+    final s = tx.status;
+    if (s != 'الغاء' && s != 'ملغية') return s;
+    final kind = _kindOf(tx.type);
+    if (kind == _TxKind.user) return 'تم التسليم';
+    if (kind == _TxKind.delivery) {
+      final wasDelivered =
+          CurrencyDenoms.extractDeliveredDenomsNote(tx.note) != null;
+      return wasDelivered ? 'تم التسليم' : 'مضافة';
+    }
+    return 'مضافة';
+  }
+
   Future<void> _revertCancellation(Transaction transaction) async {
+    final restoredStatus = _statusAfterRevert(transaction);
     await _withBusy(transaction.id, () async {
+      // إعادة تطبيق أثر فئات الحركة على الصندوق (عكس ما فعله الإلغاء).
+      await CurrencyDenoms.reapplyOldStock(transaction, _currencies);
       await widget.db.updateTransaction(
         transaction.id,
-        const TransactionsCompanion(
-          status: drift.Value('مضافة'),
-          movementState: drift.Value('مفعلة'),
+        TransactionsCompanion(
+          status: drift.Value(restoredStatus),
+          movementState: const drift.Value('مفعلة'),
         ),
       );
       await widget.db.insertEdit(
@@ -432,14 +453,14 @@ class _RecordsPageState extends State<RecordsPage> {
           transactionId: transaction.id,
           field: 'تراجع عن الإلغاء',
           oldValue: 'الغاء',
-          newValue: 'مضافة',
+          newValue: restoredStatus,
           editedBy: drift.Value(widget.user.username),
         ),
       );
       await _loadData();
     });
     AppSound.play(TimaSound.success);
-    _toast('تم التراجع عن الإلغاء — عادت الحركة معلقة', AppColors.ocean);
+    _toast('تم التراجع عن الإلغاء — عادت الحركة وأُعيدت فئاتها', AppColors.ocean);
   }
 
   Future<void> _deliver(Transaction transaction) async {

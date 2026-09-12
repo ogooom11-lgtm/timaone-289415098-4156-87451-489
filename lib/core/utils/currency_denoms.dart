@@ -224,6 +224,26 @@ class CurrencyDenoms {
     }
   }
 
+  /// يعيد تطبيق أثر حركة على المخزون (عكس [reverseOldStock] تماماً).
+  ///
+  /// يُستدعى عند التراجع عن الإلغاء: الحركة الواردة تُضاف فئاتها من جديد،
+  /// والصادرة تُخصم من جديد، فيعود الصندوق لما كان عليه قبل الإلغاء.
+  static Future<void> reapplyOldStock(
+    Transaction oldTx,
+    Map<int, Currency> currencies,
+  ) async {
+    final effects = oldStockEffects(oldTx, currencies);
+    for (final entry in effects.entries) {
+      final cur = currencies[entry.key];
+      if (cur == null || entry.value.counts.isEmpty) continue;
+      if (entry.value.isInflow) {
+        await addStock(cur, entry.value.counts);
+      } else {
+        await deductStock(cur, entry.value.counts);
+      }
+    }
+  }
+
   static double sumCounts(Map<double, int> counts) {
     var sum = 0.0;
     counts.forEach((denom, count) => sum += denom * count);
