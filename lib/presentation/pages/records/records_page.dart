@@ -385,8 +385,19 @@ class _RecordsPageState extends State<RecordsPage> {
     }
   }
 
+  /// يلخّص الفئات المتأثّرة لكل عملة (الأولى والثانية) لرسائل التأكيد.
+  String _denomsSummary(Map<int, OldStockEffect> effects) {
+    final parts = <String>[
+      for (final e in effects.entries)
+        if (_currencies[e.key] != null && e.value.counts.isNotEmpty)
+          '${_currencies[e.key]!.code}: ${CurrencyDenoms.formatCounts(e.value.counts)}',
+    ];
+    return parts.isEmpty ? '' : ' — الفئات: ${parts.join(' | ')}';
+  }
+
   Future<void> _cancel(Transaction transaction) async {
     if (!await _confirmCancel(transaction)) return;
+    final reversed = CurrencyDenoms.oldStockEffects(transaction, _currencies);
     await _withBusy(transaction.id, () async {
       // عكس أثر فئات الحركة على الصندوق: يحذف ما أُضيف / يُرجع ما خُصم.
       // الحركة المعلقة (تسليم غير مُسلَّم) لا فئات لها فأثرها معدوم.
@@ -411,7 +422,7 @@ class _RecordsPageState extends State<RecordsPage> {
     });
     AppSound.play(TimaSound.error);
     _toast(
-      'تم إلغاء الحركة — يمكنك التراجع الآن',
+      'تم إلغاء الحركة${_denomsSummary(reversed)} — يمكنك التراجع الآن',
       AppColors.error,
       action: SnackBarAction(
         label: 'تراجع',
@@ -438,6 +449,7 @@ class _RecordsPageState extends State<RecordsPage> {
 
   Future<void> _revertCancellation(Transaction transaction) async {
     final restoredStatus = _statusAfterRevert(transaction);
+    final reapplied = CurrencyDenoms.oldStockEffects(transaction, _currencies);
     await _withBusy(transaction.id, () async {
       // إعادة تطبيق أثر فئات الحركة على الصندوق (عكس ما فعله الإلغاء).
       await CurrencyDenoms.reapplyOldStock(transaction, _currencies);
@@ -460,7 +472,10 @@ class _RecordsPageState extends State<RecordsPage> {
       await _loadData();
     });
     AppSound.play(TimaSound.success);
-    _toast('تم التراجع عن الإلغاء — عادت الحركة وأُعيدت فئاتها', AppColors.ocean);
+    _toast(
+      'تم التراجع عن الإلغاء — عادت الحركة${_denomsSummary(reapplied)}',
+      AppColors.ocean,
+    );
   }
 
   Future<void> _deliver(Transaction transaction) async {
