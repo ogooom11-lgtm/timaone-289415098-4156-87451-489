@@ -451,17 +451,169 @@ class _RecordsPageState extends State<RecordsPage> {
     return 'مضافة';
   }
 
+  /// يزيل كل طوابع الفئات/التسليم من ملاحظة، ويبقي نص المستخدم فقط.
+  String _stripDenomStamps(String note) {
+    return note
+        .replaceAll(RegExp(r'\[تم التسليم في [^\]]+\]'), '')
+        .replaceAll(RegExp(r'\[فئات المسلم 2: [^\]]+\]'), '')
+        .replaceAll(RegExp(r'\[فئات المسلم: [^\]]+\]'), '')
+        .replaceAll(RegExp(r'\[الفئات المسلمة لـ [^\]]+\]'), '')
+        .replaceAll(RegExp(r'\[الفئات المستلمة للحوالة لـ [^\]]+\]'), '')
+        .replaceAll(RegExp(r'\[الفئات المستلمة لـ [^\]]+\]'), '')
+        .replaceAll(RegExp(r'\[فئات الأجور لـ [^\]]+\]'), '')
+        .replaceAll(RegExp(r'\[فئات المسلم لـ [^\]]+\]'), '')
+        .replaceAll(RegExp(r'\[فئات المستلم لـ [^\]]+\]'), '')
+        .trim();
+  }
+
+  /// هل فئات الحركة المحفوظة في الملاحظة لم تعد تطابق مبلغها الحالي؟
+  /// (يحدث حين تُعدَّل الحركة وهي ملغية فيتغيّر المبلغ وتبقى الفئات القديمة.)
+  bool _denomsStale(Transaction tx, Map<int, OldStockEffect> effects) {
+    final main = effects[tx.currencyId];
+    if (main != null &&
+        (CurrencyDenoms.sumCounts(main.counts) - tx.amount).abs() > 0.01) {
+      return true;
+    }
+    if (tx.targetAmount != null && tx.targetCurrencyId != null) {
+      final t = effects[tx.targetCurrencyId!];
+      if (t != null &&
+          (CurrencyDenoms.sumCounts(t.counts) - tx.targetAmount!).abs() > 0.01) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// يطلب فئات جديدة مطابقة للمبلغ الحالي عند التراجع عن إلغاء حركة عُدِّلت
+  /// وهي ملغية، ويطبّقها على الصندوق، ويعيد الملاحظة الجديدة. `null` = تراجع.
+  Future<String?> _askFreshDenomsForRevert(Transaction transaction) async {
+    final kind = _kindOf(transaction.type);
+    final currency1 = _currencies[transaction.currencyId];
+    if (currency1 == null) return null;
+    final old = CurrencyDenoms.oldStockEffects(transaction, _currencies);
+    final mainInflow = old[transaction.currencyId]?.isInflow ?? true;
+
+    final stock1 = mainInflow ? null : await CurrencyDenoms.loadStock(currency1);
+    if (!mounted) return null;
+    final counts1 = await showDialog<Map<double, int>>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => DenomValidatorDialog(
+        targetAmount: transaction.amount,
+        currency: currency1,
+        title: 'إدخال الفئات من جديد (${currency1.code})',
+        mode: mainInflow ? DenomDialogMode.inflow : DenomDialogMode.outflow,
+        availableStock: stock1,
+      ),
+    );
+    if (counts1 == null) return null;
+
+    Map<double, int>? counts2;
+    Currency? currency2;
+    var secondInflow = true;
+    if (transaction.targetAmount != null &&
+        transaction.targetAmount! > 0 &&
+        transaction.targetCurrencyId != null) {
+      currency2 = _currencies[transaction.targetCurrencyId!];
+      if (currency2 != null) {
+        secondInflow = old[currency2.id]?.isInflow ?? true;
+        final stock2 = secondInflow
+            ? null
+            : await CurrencyDenoms.loadStock(currency2);
+        if (!mounted) return null;
+        counts2 = await showDialog<Map<double, int>>(
+          context: context,
+          barrierDismissible: false,
+          builder: (_) => DenomValidatorDialog(
+            targetAmount: transaction.targetAmount!,
+            currency: currency2!,
+            title: 'إدخال فئات المبلغ الثاني من جديد (${currency2.code})',
+            mode: secondInflow ? DenomDialogMode.inflow : DenomDialogMode.outflow,
+            availableStock: stock2,
+          ),
+        );
+        if (counts2 == null) return null;
+      }
+    }
+
+    // تطبيق الفئات الجديدة على الصندوق.
+    Future<void> apply(Currency c, Map<double, int> counts, bool inflow) async {
+      if (counts.isEmpty) return;
+      if (inflow) {
+        await CurrencyDenoms.addStock(c, counts);
+      } else {
+        await CurrencyDenoms.deductStock(c, counts);
+      }
+    }
+
+    await apply(currency1, counts1, mainInflow);
+    if (counts2 != null && currency2 != null) {
+      await apply(currency2, counts2, secondInflow);
+    }
+
+    // بناء الملاحظة الجديدة وفق صيغة كل نوع.
+    final userNote = _stripDenomStamps(transaction.note ?? '');
+    final base = userNote.isEmpty ? '' : '$userNote\n';
+    String fmt(Map<double, int> c) => CurrencyDenoms.formatCounts(c);
+    final has2 = counts2 != null && currency2 != null;
+    String note;
+    switch (kind) {
+      case _TxKind.receive:
+        note = '$base[الفئات المستلمة لـ ${currency1.code}: ${fmt(counts1)}]';
+        if (has2) {
+          note += '\n[الفئات المستلمة لـ ${currency2!.code}: ${fmt(counts2!)}]';
+        }
+      case _TxKind.sent:
+        note =
+            '$base[الفئات المستلمة للحوالة لـ ${currency1.code}: ${fmt(counts1)}]';
+      case _TxKind.user:
+        note = '$base[الفئات المسلمة لـ ${currency1.code}: ${fmt(counts1)}]';
+        if (has2) {
+          note += '\n[الفئات المسلمة لـ ${currency2!.code}: ${fmt(counts2!)}]';
+        }
+      case _TxKind.delivery:
+        final nowStr = DateFormat('yyyy-MM-dd HH:mm').format(DateTime.now());
+        note = '$base[تم التسليم في $nowStr]\n[فئات المسلم: ${fmt(counts1)}]';
+        if (has2) {
+          note += '\n[فئات المسلم 2: ${fmt(counts2!)} (${currency2!.code})]';
+        }
+      case _TxKind.exchange:
+        note = '$base[فئات المسلم لـ ${currency1.code}: ${fmt(counts1)}]';
+        if (has2) {
+          note += '\n[فئات المستلم لـ ${currency2!.code}: ${fmt(counts2!)}]';
+        }
+    }
+    return note;
+  }
+
   Future<void> _revertCancellation(Transaction transaction) async {
     final restoredStatus = _statusAfterRevert(transaction);
-    final reapplied = CurrencyDenoms.oldStockEffects(transaction, _currencies);
+    final effects = CurrencyDenoms.oldStockEffects(transaction, _currencies);
+
+    // إن عُدِّلت الحركة وهي ملغية (فئاتها لم تعد تطابق مبلغها) نطلب فئات
+    // جديدة بدل إعادة القديمة. حركة مرسلة تُترك كما هي (لأجورِها صيغة خاصة).
+    final stale = _kindOf(transaction.type) != _TxKind.sent &&
+        _denomsStale(transaction, effects);
+    String? freshNote;
+    if (stale) {
+      freshNote = await _askFreshDenomsForRevert(transaction);
+      if (freshNote == null) return; // تراجع المستخدم
+    }
+
     await _withBusy(transaction.id, () async {
-      // إعادة تطبيق أثر فئات الحركة على الصندوق (عكس ما فعله الإلغاء).
-      await CurrencyDenoms.reapplyOldStock(transaction, _currencies);
+      if (!stale) {
+        // إعادة تطبيق أثر فئات الحركة على الصندوق (عكس ما فعله الإلغاء).
+        await CurrencyDenoms.reapplyOldStock(transaction, _currencies);
+      }
+      // (إن كانت stale فـ _askFreshDenomsForRevert حدّث مخزون الصندوق مسبقاً.)
       await widget.db.updateTransaction(
         transaction.id,
         TransactionsCompanion(
           status: drift.Value(restoredStatus),
           movementState: const drift.Value('مفعلة'),
+          note: freshNote != null
+              ? drift.Value(freshNote)
+              : const drift.Value.absent(),
         ),
       );
       await widget.db.insertEdit(
@@ -477,7 +629,9 @@ class _RecordsPageState extends State<RecordsPage> {
     });
     AppSound.play(TimaSound.success);
     _toast(
-      'تم التراجع عن الإلغاء — عادت الحركة${_denomsSummary(reapplied)}',
+      stale
+          ? 'تم التراجع عن الإلغاء — أُدخلت فئات الحركة من جديد'
+          : 'تم التراجع عن الإلغاء — عادت الحركة${_denomsSummary(effects)}',
       AppColors.ocean,
     );
   }
