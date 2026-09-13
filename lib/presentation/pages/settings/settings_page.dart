@@ -484,9 +484,11 @@ class _SettingsPageState extends State<SettingsPage> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text("⚠️ إعادة تهيئة قاعدة البيانات"),
+        title: const Text("⚠️ إعادة تهيئة الحركات والأرصدة"),
         content: const Text(
-          "تنبيه هام! هذا الخيار سيحذف جميع الحركات، الصناديق، والتعديلات المسجلة نهائيًا ويعيد النظام لحالته الأولى. هل تريد الاستمرار؟",
+          "تنبيه هام! سيحذف هذا الخيار جميع الحركات والتعديلات المسجلة، ويصفّر "
+          "فئات الصناديق (مخزون الأوراق) نهائياً — مع إبقاء العملات وحسابات "
+          "المستخدمين والإعدادات. هل تريد الاستمرار؟",
           style: TextStyle(color: AppColors.error),
         ),
         actions: [
@@ -506,9 +508,64 @@ class _SettingsPageState extends State<SettingsPage> {
     if (confirmed == true) {
       await widget.db.customStatement('DELETE FROM edits');
       await widget.db.customStatement('DELETE FROM transactions');
+      await CurrencyDenoms.clearAllStock();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("تم إعادة تهيئة الحركات والصناديق بنجاح")),
+        const SnackBar(
+          content: Text("تم حذف الحركات والتعديلات وتصفير فئات الصناديق"),
+        ),
+      );
+      _refreshData();
+    }
+  }
+
+  /// حذف كل البيانات وإعادة التطبيق من الصفر (يبقي حسابات المستخدمين فقط).
+  Future<void> _wipeAllData() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text("🗑️ حذف البيانات بالكامل"),
+        content: const Text(
+          "تحذير أخير! سيحذف هذا الخيار كل شيء ويعيد التطبيق من الصفر: جميع "
+          "الحركات والتعديلات، فئات الصناديق، كل العملات، وإعدادات الطباعة "
+          "والإيصال وتيليغرام والمطابقات. تبقى حسابات المستخدمين فقط. لا يمكن "
+          "التراجع — يُنصح بأخذ نسخة احتياطية أولاً. هل تريد الاستمرار؟",
+          style: TextStyle(color: AppColors.error),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text("إلغاء"),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: AppColors.error),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text("حذف كل البيانات"),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true) {
+      // 1) كل البيانات المالية من قاعدة البيانات.
+      await widget.db.customStatement('DELETE FROM edits');
+      await widget.db.customStatement('DELETE FROM transactions');
+      await widget.db.customStatement('DELETE FROM currencies');
+      // 2) فئات الصناديق + إعدادات الطباعة/الإيصال/تيليغرام/المطابقات.
+      final data = await DeviceSettings.readAll();
+      data.removeWhere((key, _) => key.startsWith('bill_count_'));
+      data.remove('reconciliations');
+      data.remove('reconciliationSelection');
+      data.remove('telegramBotToken');
+      data.remove('telegramChatId');
+      data.remove('defaultPrinterName');
+      data.remove('receiptSettings');
+      await DeviceSettings.writeAll(data);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("تم حذف جميع البيانات — بقيت حسابات المستخدمين فقط"),
+        ),
       );
       _refreshData();
     }
@@ -1048,11 +1105,22 @@ class _SettingsPageState extends State<SettingsPage> {
                         Icons.delete_forever,
                         color: AppColors.error,
                       ),
-                      title: const Text("إعادة تهيئة الحركات"),
+                      title: const Text("إعادة تهيئة الحركات والأرصدة"),
                       subtitle: const Text(
-                        "حذف جميع الحركات المسجلة مع تصفير الصناديق",
+                        "حذف الحركات والتعديلات وتصفير فئات الصناديق (يبقي العملات والحسابات)",
                       ),
                       onTap: _resetDatabase,
+                    ),
+                    ListTile(
+                      leading: const Icon(
+                        Icons.settings_backup_restore,
+                        color: AppColors.error,
+                      ),
+                      title: const Text("حذف البيانات بالكامل"),
+                      subtitle: const Text(
+                        "يعيد التطبيق من الصفر: الحركات والفئات والعملات والإعدادات (يبقي الحسابات)",
+                      ),
+                      onTap: _wipeAllData,
                     ),
                   ],
                 ),

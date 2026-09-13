@@ -313,6 +313,14 @@ class CurrencyDenoms {
     await DeviceSettings.writeAll(data);
   }
 
+  /// يحذف مخزون الفئات لكل العملات (كل مفاتيح `bill_count_*`) من إعدادات الجهاز.
+  /// يُستخدم عند تصفير الأرصدة أو حذف البيانات بالكامل.
+  static Future<void> clearAllStock() async {
+    final data = await DeviceSettings.readAll();
+    data.removeWhere((key, _) => key.startsWith('bill_count_'));
+    await DeviceSettings.writeAll(data);
+  }
+
   static int _asInt(dynamic value) {
     if (value is int) return value;
     if (value is num) return value.toInt();
