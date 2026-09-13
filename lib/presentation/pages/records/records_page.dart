@@ -263,11 +263,15 @@ class _RecordsPageState extends State<RecordsPage> {
       _TxKind.delivery => _TxPolicy(
         canDeliver: pending,
         canEdit: true,
-        canCancel: !canceled,
+        // الحركة المُسلَّمة لا تُلغى مباشرة — يجب «تراجع عن التسليم» أولاً
+        // (لتعود فئاتها للصندوق) ثم إلغاؤها وهي معلقة.
+        canCancel: pending,
         canRevertCancel: canceled,
         canRevertDelivery: delivered,
         canPrint: true,
-        hint: 'حركة تسليم: تُسلَّم أو تُعدَّل أو تُلغى، والتراجع متاح دائماً',
+        hint: delivered
+            ? 'حركة تسليم مُسلَّمة: تراجع عن التسليم أولاً ثم ألغِها'
+            : 'حركة تسليم: تُسلَّم أو تُعدَّل أو تُلغى، والتراجع متاح دائماً',
       ),
       _TxKind.user => _TxPolicy(
         canDeliver: canceled,

@@ -99,6 +99,18 @@ class _AddExchangePageState extends State<AddExchangePage> {
         .join(", ");
   }
 
+  /// يضيف فئات الحركة نفسها إلى مخزون الصندوق — يُستخدم عند التعديل حتى
+  /// يستطيع المستخدم التصرّف بفئات الحركة القديمة (التي ستُعكس عند الحفظ).
+  Map<double, int> _stockPlusOwn(
+    Map<double, int> stock,
+    Map<double, int>? own,
+  ) {
+    if (own == null || own.isEmpty) return stock;
+    final result = Map<double, int>.from(stock);
+    own.forEach((d, c) => result[d] = (result[d] ?? 0) + c);
+    return result;
+  }
+
   Future<void> _save() async {
     if (!_formKey.currentState!.validate() ||
         _currencyFromId == null ||
@@ -115,49 +127,70 @@ class _AddExchangePageState extends State<AddExchangePage> {
     final currencyFrom = _currencies.firstWhere((c) => c.id == _currencyFromId);
     final currencyTo = _currencies.firstWhere((c) => c.id == _currencyToId);
 
-    // 1. فئات الصادر — مقيدة بمخزون الصندوق
-    final stockFrom = await CurrencyDenoms.loadStock(currencyFrom);
-    if (!mounted) return;
-    final countsFrom = await showDialog<Map<double, int>>(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => DenomValidatorDialog(
-        targetAmount: amountFromVal,
-        currency: currencyFrom,
-        title: "تفصيل فئات المبلغ المسلم (الصادر من الصندوق)",
-        mode: DenomDialogMode.outflow,
-        availableStock: stockFrom,
-      ),
-    );
-    if (countsFrom == null) return; // تراجع المستخدم
+    // الحركة الملغاة لا تمسّ الصندوق — تعديلها يجب ألا يطلب الفئات ولا يلمس المخزون.
+    final bool wasCancelled = _isEditMode &&
+        (widget.transaction!.movementState == 'ملغية' ||
+            widget.transaction!.status == 'الغاء');
 
-    // 2. فئات الوارد — بدون قيد مخزون (تدخل للصندوق)
-    if (!mounted) return;
-    final countsTo = await showDialog<Map<double, int>>(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => DenomValidatorDialog(
-        targetAmount: amountToVal,
-        currency: currencyTo,
-        title: "تفصيل فئات المبلغ المستلم (الوارد للصندوق)",
-        mode: DenomDialogMode.inflow,
-      ),
-    );
-    if (countsTo == null) return; // تراجع المستخدم
-
-    final denomNote =
-        "[فئات المسلم لـ ${currencyFrom.code}: ${_formatCounts(countsFrom)}]\n[فئات المستلم لـ ${currencyTo.code}: ${_formatCounts(countsTo)}]";
-
-    // تحديث مخزون الأوراق: خصم الصادر + إضافة الوارد
-    // عكس أثر الفئات القديمة قبل تطبيق الجديدة (تعديل صحيح بالفرق).
-    if (_isEditMode) {
-      await CurrencyDenoms.reverseOldStock(
-        widget.transaction!,
-        {for (final c in _currencies) c.id: c},
+    String denomNote;
+    if (wasCancelled) {
+      denomNote = widget.transaction!.note ?? "";
+    } else {
+      // عند التعديل: فئات الحركة نفسها تُضاف لمخزون الصادر (ستُعكس عند الحفظ).
+      final oldEffects = _isEditMode
+          ? CurrencyDenoms.oldStockEffects(
+              widget.transaction!,
+              {for (final c in _currencies) c.id: c},
+            )
+          : const <int, OldStockEffect>{};
+      // 1. فئات الصادر — مقيدة بمخزون الصندوق + فئات الحركة المعدَّلة
+      final stockFrom = await CurrencyDenoms.loadStock(currencyFrom);
+      final availFrom = _stockPlusOwn(
+        stockFrom,
+        oldEffects[currencyFrom.id]?.counts,
       );
+      if (!mounted) return;
+      final countsFrom = await showDialog<Map<double, int>>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => DenomValidatorDialog(
+          targetAmount: amountFromVal,
+          currency: currencyFrom,
+          title: "تفصيل فئات المبلغ المسلم (الصادر من الصندوق)",
+          mode: DenomDialogMode.outflow,
+          availableStock: availFrom,
+        ),
+      );
+      if (countsFrom == null) return; // تراجع المستخدم
+
+      // 2. فئات الوارد — بدون قيد مخزون (تدخل للصندوق)
+      if (!mounted) return;
+      final countsTo = await showDialog<Map<double, int>>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => DenomValidatorDialog(
+          targetAmount: amountToVal,
+          currency: currencyTo,
+          title: "تفصيل فئات المبلغ المستلم (الوارد للصندوق)",
+          mode: DenomDialogMode.inflow,
+        ),
+      );
+      if (countsTo == null) return; // تراجع المستخدم
+
+      denomNote =
+          "[فئات المسلم لـ ${currencyFrom.code}: ${_formatCounts(countsFrom)}]\n[فئات المستلم لـ ${currencyTo.code}: ${_formatCounts(countsTo)}]";
+
+      // تحديث مخزون الأوراق: خصم الصادر + إضافة الوارد
+      // عكس أثر الفئات القديمة قبل تطبيق الجديدة (تعديل صحيح بالفرق).
+      if (_isEditMode) {
+        await CurrencyDenoms.reverseOldStock(
+          widget.transaction!,
+          {for (final c in _currencies) c.id: c},
+        );
+      }
+      await CurrencyDenoms.deductStock(currencyFrom, countsFrom);
+      await CurrencyDenoms.addStock(currencyTo, countsTo);
     }
-    await CurrencyDenoms.deductStock(currencyFrom, countsFrom);
-    await CurrencyDenoms.addStock(currencyTo, countsTo);
 
     if (_isEditMode) {
       final oldTx = widget.transaction!;

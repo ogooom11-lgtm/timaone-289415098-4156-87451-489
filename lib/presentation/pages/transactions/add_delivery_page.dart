@@ -99,6 +99,19 @@ class _AddDeliveryPageState extends State<AddDeliveryPage> {
         .join(", ");
   }
 
+  /// يضيف فئات الحركة نفسها إلى مخزون الصندوق — يُستخدم عند التعديل حتى
+  /// يستطيع المستخدم التصرّف بفئات الحركة القديمة (التي ستُعكس عند الحفظ)،
+  /// فيرى «مخزون الصندوق + فئات الحركة المعدَّلة» لا مخزون الصندوق وحده.
+  Map<double, int> _stockPlusOwn(
+    Map<double, int> stock,
+    Map<double, int>? own,
+  ) {
+    if (own == null || own.isEmpty) return stock;
+    final result = Map<double, int>.from(stock);
+    own.forEach((d, c) => result[d] = (result[d] ?? 0) + c);
+    return result;
+  }
+
   /// يزيل طوابع الفئات/التسليم من الملاحظة ويبقي نص المستخدم فقط.
   String _stripDenomMarkers(String note) {
     return note
@@ -307,6 +320,9 @@ class _AddDeliveryPageState extends State<AddDeliveryPage> {
     final prevTx = _isEditMode ? widget.transaction! : null;
     final bool isUserType = _deliveryType == "حركة يوزر";
     final bool wasDelivered = prevTx?.status == "تم التسليم";
+    // الحركة الملغاة لا تمسّ الصندوق — تعديلها يجب ألا يطلب الفئات ولا يلمس المخزون.
+    final bool wasCancelled =
+        prevTx?.movementState == 'ملغية' || prevTx?.status == 'الغاء';
     bool nameOnlyEdit = false;
     if (prevTx != null) {
       nameOnlyEdit =
@@ -317,13 +333,22 @@ class _AddDeliveryPageState extends State<AddDeliveryPage> {
     }
     final bool needDenoms = !_isEditMode
         ? isUserType
-        : (isUserType || wasDelivered) && !nameOnlyEdit;
+        : (isUserType || wasDelivered) && !nameOnlyEdit && !wasCancelled;
 
     Map<double, int>? userCounts1;
     Map<double, int>? userCounts2;
     Currency? userCurrency2;
     if (needDenoms) {
+      // عند التعديل: فئات الحركة نفسها تُضاف لمخزون الصندوق (ستُعكس عند الحفظ)،
+      // فيرى المستخدم «مخزون الصندوق + فئات الحركة المعدَّلة» ويستطيع إعادة استخدامها.
+      final oldEffects = prevTx != null
+          ? CurrencyDenoms.oldStockEffects(
+              prevTx,
+              {for (final c in _currencies) c.id: c},
+            )
+          : const <int, OldStockEffect>{};
       final stock1 = await CurrencyDenoms.loadStock(currency1);
+      final avail1 = _stockPlusOwn(stock1, oldEffects[currency1.id]?.counts);
       if (!mounted) return;
       final counts1 = await showDialog<Map<double, int>>(
         context: context,
@@ -335,7 +360,7 @@ class _AddDeliveryPageState extends State<AddDeliveryPage> {
               ? "تفصيل فئات المبلغ المسلم (حركة يوزر)"
               : "تفصيل فئات المبلغ المسلم",
           mode: DenomDialogMode.outflow,
-          availableStock: stock1,
+          availableStock: avail1,
         ),
       );
       if (counts1 == null) return; // تراجع المستخدم
@@ -344,6 +369,10 @@ class _AddDeliveryPageState extends State<AddDeliveryPage> {
       if (_showSecondAmount && amount2Val != null && currency2Val != null) {
         userCurrency2 = _currencies.firstWhere((c) => c.id == currency2Val);
         final stock2 = await CurrencyDenoms.loadStock(userCurrency2);
+        final avail2 = _stockPlusOwn(
+          stock2,
+          oldEffects[userCurrency2.id]?.counts,
+        );
         if (!mounted) return;
         final counts2 = await showDialog<Map<double, int>>(
           context: context,
@@ -355,7 +384,7 @@ class _AddDeliveryPageState extends State<AddDeliveryPage> {
                 ? "تفصيل فئات المبلغ المسلم الثاني (حركة يوزر)"
                 : "تفصيل فئات المبلغ المسلم الثاني",
             mode: DenomDialogMode.outflow,
-            availableStock: stock2,
+            availableStock: avail2,
           ),
         );
         if (counts2 == null) return; // تراجع المستخدم

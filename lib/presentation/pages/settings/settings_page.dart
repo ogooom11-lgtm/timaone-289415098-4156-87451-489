@@ -527,9 +527,10 @@ class _SettingsPageState extends State<SettingsPage> {
         title: const Text("🗑️ حذف البيانات بالكامل"),
         content: const Text(
           "تحذير أخير! سيحذف هذا الخيار كل شيء ويعيد التطبيق من الصفر: جميع "
-          "الحركات والتعديلات، فئات الصناديق، كل العملات، وإعدادات الطباعة "
-          "والإيصال وتيليغرام والمطابقات. تبقى حسابات المستخدمين فقط. لا يمكن "
-          "التراجع — يُنصح بأخذ نسخة احتياطية أولاً. هل تريد الاستمرار؟",
+          "الحركات والتعديلات، فئات الصناديق، كل العملات، كل حسابات المستخدمين "
+          "(حتى حسابك)، وإعدادات الطباعة والإيصال وتيليغرام والمطابقات. سيعود "
+          "التطبيق إلى شاشة الإعداد الأولى. لا يمكن التراجع — يُنصح بأخذ نسخة "
+          "احتياطية أولاً. هل تريد الاستمرار؟",
           style: TextStyle(color: AppColors.error),
         ),
         actions: [
@@ -547,11 +548,13 @@ class _SettingsPageState extends State<SettingsPage> {
     );
 
     if (confirmed == true) {
-      // 1) كل البيانات المالية من قاعدة البيانات.
+      // 1) كل البيانات من قاعدة البيانات (بما فيها المستخدمون والعملات).
       await widget.db.customStatement('DELETE FROM edits');
       await widget.db.customStatement('DELETE FROM transactions');
       await widget.db.customStatement('DELETE FROM currencies');
-      // 2) فئات الصناديق + إعدادات الطباعة/الإيصال/تيليغرام/المطابقات.
+      await widget.db.customStatement('DELETE FROM users');
+      // 2) فئات الصناديق + كل الإعدادات (طباعة/إيصال/تيليغرام/مطابقات/
+      //    المكتب/المستخدم المتذكَّر) ليعود التطبيق كشاشة إعداد أولى.
       final data = await DeviceSettings.readAll();
       data.removeWhere((key, _) => key.startsWith('bill_count_'));
       data.remove('reconciliations');
@@ -560,14 +563,14 @@ class _SettingsPageState extends State<SettingsPage> {
       data.remove('telegramChatId');
       data.remove('defaultPrinterName');
       data.remove('receiptSettings');
+      data.remove('rememberedUserId');
+      data.remove('officeName');
+      data.remove('officeSetupCompleted');
+      data.remove('officeSetupCompletedAt');
       await DeviceSettings.writeAll(data);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text("تم حذف جميع البيانات — بقيت حسابات المستخدمين فقط"),
-        ),
-      );
-      _refreshData();
+      // العودة إلى شاشة الإعداد الأولى كأنه تثبيت جديد.
+      Navigator.of(context).pushNamedAndRemoveUntil('/', (route) => false);
     }
   }
 

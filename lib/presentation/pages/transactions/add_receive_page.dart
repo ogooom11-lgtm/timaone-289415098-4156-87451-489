@@ -151,56 +151,69 @@ class _AddReceivePageState extends State<AddReceivePage> {
       (c) => c.id == _selectedCurrencyId,
     );
 
-    // 1. فئات المقبوضات (تدخل للصندوق)
-    final counts1 = await showDialog<Map<double, int>>(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => DenomValidatorDialog(
-        targetAmount: amountVal,
-        currency: currency1,
-        title: "تفصيل فئات المقبوضات (المبلغ 1)",
-        mode: DenomDialogMode.inflow,
-      ),
-    );
-    if (counts1 == null) return; // تراجع المستخدم
+    // الحركة الملغاة لا تمسّ الصندوق — تعديلها يجب ألا يطلب الفئات ولا
+    // يعكس/يضيف مخزوناً؛ تبقى فئاتها القديمة في الملاحظة كما هي حتى التراجع.
+    final bool wasCancelled = _isEditMode &&
+        (widget.transaction!.movementState == 'ملغية' ||
+            widget.transaction!.status == 'الغاء');
 
-    // 2. مبلغ ثانٍ اختياري
+    Map<double, int>? counts1;
     Map<double, int>? counts2;
     Currency? currency2;
-    if (_showSecondAmount && amount2Val != null && currency2Val != null) {
-      currency2 = _currencies.firstWhere((c) => c.id == currency2Val);
-      if (!mounted) return;
-      counts2 = await showDialog<Map<double, int>>(
+    String denomNote;
+
+    if (wasCancelled) {
+      denomNote = widget.transaction!.note ?? "";
+    } else {
+      // 1. فئات المقبوضات (تدخل للصندوق)
+      counts1 = await showDialog<Map<double, int>>(
         context: context,
         barrierDismissible: false,
         builder: (_) => DenomValidatorDialog(
-          targetAmount: amount2Val,
-          currency: currency2!,
-          title: "تفصيل فئات المقبوضات الثانية (المبلغ 2)",
+          targetAmount: amountVal,
+          currency: currency1,
+          title: "تفصيل فئات المقبوضات (المبلغ 1)",
           mode: DenomDialogMode.inflow,
         ),
       );
-      if (counts2 == null) return; // تراجع المستخدم
-    }
+      if (counts1 == null) return; // تراجع المستخدم
 
-    // بناء الملاحظة الذكية للفئات
-    String denomNote =
-        "[الفئات المستلمة لـ ${currency1.code}: ${_formatCounts(counts1)}]";
-    if (counts2 != null && currency2 != null) {
-      denomNote +=
-          "\n[الفئات المستلمة لـ ${currency2.code}: ${_formatCounts(counts2)}]";
-    }
+      // 2. مبلغ ثانٍ اختياري
+      if (_showSecondAmount && amount2Val != null && currency2Val != null) {
+        currency2 = _currencies.firstWhere((c) => c.id == currency2Val);
+        if (!mounted) return;
+        counts2 = await showDialog<Map<double, int>>(
+          context: context,
+          barrierDismissible: false,
+          builder: (_) => DenomValidatorDialog(
+            targetAmount: amount2Val,
+            currency: currency2!,
+            title: "تفصيل فئات المقبوضات الثانية (المبلغ 2)",
+            mode: DenomDialogMode.inflow,
+          ),
+        );
+        if (counts2 == null) return; // تراجع المستخدم
+      }
 
-    // عكس أثر الفئات القديمة قبل تطبيق الجديدة (تعديل صحيح بالفرق).
-    if (_isEditMode) {
-      await CurrencyDenoms.reverseOldStock(
-        widget.transaction!,
-        {for (final c in _currencies) c.id: c},
-      );
-    }
-    await CurrencyDenoms.addStock(currency1, counts1);
-    if (counts2 != null && currency2 != null) {
-      await CurrencyDenoms.addStock(currency2, counts2);
+      // بناء الملاحظة الذكية للفئات
+      denomNote =
+          "[الفئات المستلمة لـ ${currency1.code}: ${_formatCounts(counts1)}]";
+      if (counts2 != null && currency2 != null) {
+        denomNote +=
+            "\n[الفئات المستلمة لـ ${currency2.code}: ${_formatCounts(counts2)}]";
+      }
+
+      // عكس أثر الفئات القديمة قبل تطبيق الجديدة (تعديل صحيح بالفرق).
+      if (_isEditMode) {
+        await CurrencyDenoms.reverseOldStock(
+          widget.transaction!,
+          {for (final c in _currencies) c.id: c},
+        );
+      }
+      await CurrencyDenoms.addStock(currency1, counts1);
+      if (counts2 != null && currency2 != null) {
+        await CurrencyDenoms.addStock(currency2, counts2);
+      }
     }
 
     if (_isEditMode) {
@@ -282,7 +295,7 @@ class _AddReceivePageState extends State<AddReceivePage> {
           account: beneficiaryText,
           amount: amountVal,
           currency: currency1,
-          counts: counts1,
+          counts: counts1!,
         ),
       );
       if (!mounted) return;

@@ -132,54 +132,64 @@ class _AddSentPageState extends State<AddSentPage> {
       (c) => c.id == _receivedCurrencyId,
     );
 
-    // فئات الحوالة المقبوضة من العميل (تدخل للصندوق)
-    final counts1 = await showDialog<Map<double, int>>(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => DenomValidatorDialog(
-        targetAmount: receivedVal,
-        currency: currency1,
-        title: "تفصيل فئات الحوالة المستلمة من العميل",
-        mode: DenomDialogMode.inflow,
-      ),
-    );
-    if (counts1 == null) return; // تراجع المستخدم
+    // الحركة الملغاة لا تمسّ الصندوق — تعديلها يجب ألا يطلب الفئات ولا يلمس المخزون.
+    final bool wasCancelled = _isEditMode &&
+        (widget.transaction!.movementState == 'ملغية' ||
+            widget.transaction!.status == 'الغاء');
 
-    // فئات الأجور والعمولة — تُضاف للصندوق هي أيضاً مع تحديد فئاتها.
-    final feesCur = _currencies.firstWhere((c) => c.id == _feesCurrencyId);
-    Map<double, int>? feeCounts;
-    if (feesVal > 0) {
-      if (!mounted) return;
-      feeCounts = await showDialog<Map<double, int>>(
+    String denomNote;
+    if (wasCancelled) {
+      denomNote = widget.transaction!.note ?? "";
+    } else {
+      // فئات الحوالة المقبوضة من العميل (تدخل للصندوق)
+      final counts1 = await showDialog<Map<double, int>>(
         context: context,
         barrierDismissible: false,
         builder: (_) => DenomValidatorDialog(
-          targetAmount: feesVal,
-          currency: feesCur,
-          title: "تفصيل فئات الأجور والعمولة",
+          targetAmount: receivedVal,
+          currency: currency1,
+          title: "تفصيل فئات الحوالة المستلمة من العميل",
           mode: DenomDialogMode.inflow,
         ),
       );
-      if (feeCounts == null) return; // تراجع المستخدم
-    }
+      if (counts1 == null) return; // تراجع المستخدم
 
-    String denomNote =
-        "[الفئات المستلمة للحوالة لـ ${currency1.code}: ${_formatCounts(counts1)}]";
-    if (feeCounts != null && feeCounts.isNotEmpty) {
-      denomNote +=
-          "\n[فئات الأجور لـ ${feesCur.code}: ${_formatCounts(feeCounts)}]";
-    }
+      // فئات الأجور والعمولة — تُضاف للصندوق هي أيضاً مع تحديد فئاتها.
+      final feesCur = _currencies.firstWhere((c) => c.id == _feesCurrencyId);
+      Map<double, int>? feeCounts;
+      if (feesVal > 0) {
+        if (!mounted) return;
+        feeCounts = await showDialog<Map<double, int>>(
+          context: context,
+          barrierDismissible: false,
+          builder: (_) => DenomValidatorDialog(
+            targetAmount: feesVal,
+            currency: feesCur,
+            title: "تفصيل فئات الأجور والعمولة",
+            mode: DenomDialogMode.inflow,
+          ),
+        );
+        if (feeCounts == null) return; // تراجع المستخدم
+      }
 
-    // عكس أثر الفئات القديمة قبل تطبيق الجديدة (تعديل صحيح بالفرق).
-    if (_isEditMode) {
-      await CurrencyDenoms.reverseOldStock(
-        widget.transaction!,
-        {for (final c in _currencies) c.id: c},
-      );
-    }
-    await CurrencyDenoms.addStock(currency1, counts1);
-    if (feeCounts != null) {
-      await CurrencyDenoms.addStock(feesCur, feeCounts);
+      denomNote =
+          "[الفئات المستلمة للحوالة لـ ${currency1.code}: ${_formatCounts(counts1)}]";
+      if (feeCounts != null && feeCounts.isNotEmpty) {
+        denomNote +=
+            "\n[فئات الأجور لـ ${feesCur.code}: ${_formatCounts(feeCounts)}]";
+      }
+
+      // عكس أثر الفئات القديمة قبل تطبيق الجديدة (تعديل صحيح بالفرق).
+      if (_isEditMode) {
+        await CurrencyDenoms.reverseOldStock(
+          widget.transaction!,
+          {for (final c in _currencies) c.id: c},
+        );
+      }
+      await CurrencyDenoms.addStock(currency1, counts1);
+      if (feeCounts != null) {
+        await CurrencyDenoms.addStock(feesCur, feeCounts);
+      }
     }
 
     if (_isEditMode) {
