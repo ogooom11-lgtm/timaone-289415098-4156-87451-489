@@ -3,16 +3,17 @@ import 'package:excel/excel.dart' as xls;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:intl/intl.dart';
+import 'package:intl/intl.dart' hide TextDirection;
 
 import '../../../core/printing/delivery_receipt.dart';
+import '../../../core/services/app_sound.dart';
 import '../../../core/storage/app_database.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/utils/currency_denoms.dart';
 import '../../widgets/app_ui.dart';
-import '../../widgets/receipt_print_dialog.dart';
 import '../../widgets/denom_validator_dialog.dart';
+import '../../widgets/receipt_print_dialog.dart';
 import '../transactions/add_delivery_page.dart';
 
 class PendingRecordsPage extends StatefulWidget {
@@ -29,6 +30,8 @@ class _PendingRecordsPageState extends State<PendingRecordsPage> {
   List<Transaction> _pendingTransactions = [];
   Map<int, Currency> _currencies = {};
   bool _loading = true;
+  final Set<int> _expanded = {};
+  int? _busyId;
 
   @override
   void initState() {
@@ -61,6 +64,52 @@ class _PendingRecordsPageState extends State<PendingRecordsPage> {
   String _currencyCode(int? id) {
     if (id == null) return "-";
     return _currencies[id]?.code ?? id.toString();
+  }
+
+  String _formatAmount(double value) =>
+      NumberFormat('#,##0.##', 'en').format(value);
+
+  void _toast(String message, Color color) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message),
+          backgroundColor: color,
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 4),
+        ),
+      );
+  }
+
+  Future<void> _withBusy(int id, Future<void> Function() action) async {
+    setState(() => _busyId = id);
+    try {
+      await action();
+    } finally {
+      if (mounted) setState(() => _busyId = null);
+    }
+  }
+
+  /// مجاميع المبالغ المعلّقة لكل عملة (الأولى والثانية).
+  List<MapEntry<String, _PendingCurrencyTotal>> _currencyTotals() {
+    final totals = <String, _PendingCurrencyTotal>{};
+    void add(int? id, double? amount) {
+      if (id == null || amount == null) return;
+      final code = _currencyCode(id);
+      final item = totals.putIfAbsent(code, _PendingCurrencyTotal.new);
+      item.count++;
+      item.amount += amount;
+    }
+
+    for (final tx in _pendingTransactions) {
+      add(tx.currencyId, tx.amount);
+      add(tx.targetCurrencyId, tx.targetAmount);
+    }
+    final list = totals.entries.toList()
+      ..sort((a, b) => b.value.amount.compareTo(a.value.amount));
+    return list;
   }
 
   Future<void> _exportExcel() async {
@@ -132,82 +181,73 @@ class _PendingRecordsPageState extends State<PendingRecordsPage> {
     );
   }
 
-  Widget _buildSummary() {
-    final totals = <String, _PendingCurrencyTotal>{};
-    void add(int? id, double? amount) {
-      if (id == null || amount == null) return;
-      final code = _currencyCode(id);
-      final item = totals.putIfAbsent(code, _PendingCurrencyTotal.new);
-      item.count++;
-      item.amount += amount;
-    }
-
-    for (final tx in _pendingTransactions) {
-      add(tx.currencyId, tx.amount);
-      add(tx.targetCurrencyId, tx.targetAmount);
-    }
-
-    return Padding(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          const Text(
-            'ملخص الحركات المعلقة',
-            style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900),
+  Future<bool> _confirmCancel(Transaction transaction) async {
+    final amount =
+        '${_formatAmount(transaction.amount)} ${_currencyCode(transaction.currencyId)}';
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => Directionality(
+        textDirection: TextDirection.rtl,
+        child: AlertDialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(AppDims.radiusLg),
+            side: BorderSide(color: AppUi.border(ctx)),
           ),
-          const SizedBox(height: 6),
-          Text('${_pendingTransactions.length} حركة بانتظار التسليم'),
-          const Divider(height: 28),
-          ...totals.entries.map(
-            (entry) => Card(
-              child: ListTile(
-                leading: CircleAvatar(child: Text(entry.key)),
-                title: Text(
-                  entry.key,
-                  style: const TextStyle(fontWeight: FontWeight.w800),
-                ),
-                subtitle: Text('${entry.value.count} حركة'),
-                trailing: Text(
-                  entry.value.amount.toStringAsFixed(2),
-                  style: const TextStyle(fontWeight: FontWeight.w900),
-                ),
+          title: Row(
+            children: [
+              Icon(
+                Icons.report_gmailerrorred_rounded,
+                color: AppUi.tone(ctx, AppColors.error),
               ),
-            ),
+              const SizedBox(width: 8),
+              const Expanded(child: Text('إلغاء الحركة المعلقة؟'))],
           ),
-        ],
+          content: Text(
+            'ستتحول حركة «${transaction.beneficiary?.isNotEmpty == true ? transaction.beneficiary : 'تسليم'}» '
+            'بمبلغ $amount إلى حالة ملغية. يمكن التراجع عن الإلغاء من سجل الحركات.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('عودة'),
+            ),
+            FilledButton.icon(
+              style: FilledButton.styleFrom(
+                backgroundColor: AppColors.error,
+                foregroundColor: Colors.white,
+              ),
+              onPressed: () => Navigator.pop(ctx, true),
+              icon: const Icon(Icons.cancel_rounded, size: 18),
+              label: const Text('نعم، إلغاء الحركة'),
+            ),
+          ],
+        ),
       ),
     );
+    return ok == true;
   }
 
   Future<void> _cancel(Transaction transaction) async {
-    await widget.db.updateTransaction(
-      transaction.id,
-      const TransactionsCompanion(
-        movementState: drift.Value("ملغية"),
-        status: drift.Value("الغاء"),
-      ),
-    );
-    await widget.db.insertEdit(
-      EditsCompanion.insert(
-        transactionId: transaction.id,
-        field: "وضع الحركة",
-        oldValue: transaction.movementState,
-        newValue: "ملغية",
-        editedBy: drift.Value(widget.user.username),
-      ),
-    );
-    await _loadData();
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            "✗ تم إلغاء حركة التسليم المعلقة وتحديث حالتها لـ إلغاء",
-          ),
-          backgroundColor: AppColors.error,
+    if (!await _confirmCancel(transaction)) return;
+    await _withBusy(transaction.id, () async {
+      // الحركة المعلقة لم تُسلَّم بعد فلا فئات لها في الصندوق — يكفي تغيير الوضع.
+      await widget.db.updateTransaction(
+        transaction.id,
+        const TransactionsCompanion(movementState: drift.Value("ملغية")),
+      );
+      await widget.db.insertEdit(
+        EditsCompanion.insert(
+          transactionId: transaction.id,
+          field: "وضع الحركة",
+          oldValue: transaction.movementState,
+          newValue: "ملغية",
+          editedBy: drift.Value(widget.user.username),
         ),
       );
-    }
+      await _loadData();
+    });
+    AppSound.play(TimaSound.error);
+    _toast('تم إلغاء الحركة المعلقة', AppColors.error);
   }
 
   Future<void> _deliver(Transaction transaction) async {
@@ -281,30 +321,34 @@ class _PendingRecordsPageState extends State<PendingRecordsPage> {
         ? denomLines.join("\n")
         : "${transaction.note}\n${denomLines.join("\n")}";
 
-    await widget.db.updateTransaction(
-      transaction.id,
-      TransactionsCompanion(
-        status: const drift.Value("تم التسليم"),
-        note: drift.Value(newNote),
-      ),
-    );
+    await _withBusy(transaction.id, () async {
+      await widget.db.updateTransaction(
+        transaction.id,
+        TransactionsCompanion(
+          status: const drift.Value("تم التسليم"),
+          movementState: const drift.Value("مفعلة"),
+          note: drift.Value(newNote),
+        ),
+      );
+      // خصم الفئات المسلمة من مخزون الصندوق (1 + 2)
+      await CurrencyDenoms.deductStock(currency1, counts1);
+      if (counts2 != null && currency2 != null) {
+        await CurrencyDenoms.deductStock(currency2, counts2);
+      }
+      await widget.db.insertEdit(
+        EditsCompanion.insert(
+          transactionId: transaction.id,
+          field: "تغيير الحالة والتسليم",
+          oldValue: transaction.status,
+          newValue: "تم التسليم",
+          editedBy: drift.Value(widget.user.username),
+        ),
+      );
+      await _loadData();
+    });
 
-    // خصم الفئات المسلمة من مخزون الصندوق (1 + 2)
-    await CurrencyDenoms.deductStock(currency1, counts1);
-    if (counts2 != null && currency2 != null) {
-      await CurrencyDenoms.deductStock(currency2, counts2);
-    }
-
-    await widget.db.insertEdit(
-      EditsCompanion.insert(
-        transactionId: transaction.id,
-        field: "تغيير الحالة والتسليم",
-        oldValue: transaction.status,
-        newValue: "تم التسليم",
-        editedBy: drift.Value(widget.user.username),
-      ),
-    );
-    await _loadData();
+    AppSound.play(TimaSound.success);
+    _toast('تم تسليم الحركة وتحديث مخزون الصندوق', AppColors.success);
     if (!mounted) return;
 
     final receipt = DeliveryReceiptData.fromTransaction(
@@ -337,22 +381,25 @@ class _PendingRecordsPageState extends State<PendingRecordsPage> {
     _loadData();
   }
 
+  Future<void> _openImport() async {
+    final result = await Navigator.pushNamed(
+      context,
+      '/import_pending',
+      arguments: widget.user,
+    );
+    if (result == true) _loadData();
+  }
+
   @override
   Widget build(BuildContext context) {
+    final totals = _currencyTotals();
+
     return Scaffold(
       backgroundColor: Colors.transparent,
-      endDrawer: Drawer(child: SafeArea(child: _buildSummary())),
       appBar: timaMaybeAppBar(
         context,
-        title: "المعلقة والمتابعة",
+        title: "الحركات المعلقة",
         actions: [
-          Builder(
-            builder: (context) => IconButton(
-              tooltip: 'ملخص الحركات',
-              onPressed: () => Scaffold.of(context).openEndDrawer(),
-              icon: const Icon(Icons.summarize_rounded),
-            ),
-          ),
           IconButton(
             tooltip: 'تصدير Excel',
             onPressed: _pendingTransactions.isEmpty ? null : _exportExcel,
@@ -360,14 +407,7 @@ class _PendingRecordsPageState extends State<PendingRecordsPage> {
           ),
           IconButton(
             tooltip: "استيراد من Excel",
-            onPressed: () async {
-              final result = await Navigator.pushNamed(
-                context,
-                '/import_pending',
-                arguments: widget.user,
-              );
-              if (result == true) _loadData();
-            },
+            onPressed: _openImport,
             icon: const Icon(Icons.upload_file_rounded),
           ),
           IconButton(
@@ -377,180 +417,121 @@ class _PendingRecordsPageState extends State<PendingRecordsPage> {
           ),
         ],
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: () async {
-          final result = await Navigator.pushNamed(
-            context,
-            '/import_pending',
-            arguments: widget.user,
-          );
-          if (result == true) _loadData();
-        },
-        icon: const Icon(Icons.upload_file_rounded),
-        label: const Text('استيراد Excel'),
-      ),
       body: TimaPageBackground(
         child: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : _pendingTransactions.isEmpty
-          ? Column(
-              children: [
-                const Padding(
-                  padding: EdgeInsets.fromLTRB(16, 16, 16, 0),
-                  child: TimaHeaderPanel(
-                    icon: Icons.hourglass_empty_rounded,
-                    title: 'لا توجد حركات معلقة',
-                    subtitle: 'جميع حركات التسليم تم إنهاؤها أو إلغاؤها.',
-                  ),
-                ),
-                const Expanded(
-                  child: TimaEmptyState(
-                    icon: Icons.check_circle_outline_rounded,
-                    title: 'الصندوق مرتاح حالياً',
-                    subtitle: 'يمكنك استيراد حركات معلقة من Excel عند الحاجة.',
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
-                  child: FilledButton.icon(
-                    onPressed: () async {
-                      final result = await Navigator.pushNamed(
-                        context,
-                        '/import_pending',
-                        arguments: widget.user,
-                      );
-                      if (result == true) _loadData();
-                    },
-                    icon: const Icon(Icons.upload_file_rounded),
-                    label: const Text('استيراد حركات معلقة من Excel'),
-                  ),
-                ),
-              ],
-            )
-          : ListView.builder(
-              padding: const EdgeInsets.all(16),
-              itemCount: _pendingTransactions.length,
-              itemBuilder: (context, index) {
-                final tx = _pendingTransactions[index];
-                return Card(
-                  elevation: 0,
-                  margin: const EdgeInsets.symmetric(vertical: 5),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(AppDims.radius),
-                    side: BorderSide(color: AppUi.border(context)),
-                  ),
-                  child: ExpansionTile(
-                    leading: CircleAvatar(
-                      backgroundColor: AppColors.warning.withValues(alpha: 0.12),
-                      child: const Icon(
-                        Icons.history_toggle_off_rounded,
-                        color: AppColors.brandGold,
-                      ),
-                    ),
-                    title: Text(
-                      tx.beneficiary ?? "مستفيد غير معروف",
-                      style: const TextStyle(fontWeight: FontWeight.bold),
-                    ),
-                    subtitle: Text(
-                      "المبلغ المطلوب تسليمه: -${tx.amount} ${_currencyCode(tx.currencyId)}",
-                      style: const TextStyle(
-                        color: AppColors.error,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    trailing: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 10,
-                        vertical: 4,
-                      ),
-                      decoration: BoxDecoration(
-                        color: AppColors.brandGold.withValues(alpha: 0.16),
-                        borderRadius: BorderRadius.circular(AppDims.radiusSm),
-                      ),
-                      child: const Text(
-                        "مضافة (معلقة)",
-                        style: TextStyle(
-                          color: AppColors.brandGoldDark,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 11,
+            ? const TimaLoader(message: 'جارٍ تحميل الحركات المعلقة…')
+            : CustomScrollView(
+                slivers: [
+                  SliverToBoxAdapter(
+                    child: TimaContentWidth(
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(
+                          AppDims.pagePadding,
+                          16,
+                          AppDims.pagePadding,
+                          0,
+                        ),
+                        child: TimaHeaderPanel(
+                          icon: Icons.hourglass_empty_rounded,
+                          title: 'الحركات المعلقة',
+                          subtitle: _pendingTransactions.isEmpty
+                              ? 'لا حركات بانتظار التسليم'
+                              : '${_pendingTransactions.length} حركة تسليم بانتظار التسليم',
+                          trailing: TimaStatusPill(
+                            label: 'معلقة ${_pendingTransactions.length}',
+                            color: AppColors.brandGold,
+                            icon: Icons.pending_actions_rounded,
+                          ),
                         ),
                       ),
                     ),
-                    children: [
-                      ListTile(
-                        leading: const Icon(
-                          Icons.calendar_today_rounded,
-                          size: 18,
-                        ),
-                        title: Text(
-                          "تاريخ الإضافة: ${_formatDate(tx.createdAt)}",
-                        ),
-                        subtitle: Text("مسجل الحركة: ${tx.createdByName}"),
-                      ),
-                      if (tx.note != null && tx.note!.trim().isNotEmpty)
-                        ListTile(
-                          leading: const Icon(Icons.note_alt_rounded, size: 18),
-                          title: const Text("ملاحظة"),
-                          subtitle: Text(tx.note!),
-                        ),
-                      const Divider(indent: 16, endIndent: 16),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 16.0,
-                          vertical: 8.0,
-                        ),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: FilledButton.icon(
-                                style: FilledButton.styleFrom(
-                                  backgroundColor: AppColors.success,
-                                  foregroundColor: Colors.white,
-                                  shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(AppDims.radius),
+                  ),
+                  if (totals.isNotEmpty)
+                    SliverToBoxAdapter(
+                      child: TimaContentWidth(
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(
+                            AppDims.pagePadding,
+                            12,
+                            AppDims.pagePadding,
+                            0,
+                          ),
+                          child: Row(
+                            children: [
+                              for (final entry in totals) ...[
+                                Expanded(
+                                  child: _CurrencyTotalTile(
+                                    code: entry.key,
+                                    count: entry.value.count,
+                                    amount: entry.value.amount,
+                                    formatAmount: _formatAmount,
                                   ),
                                 ),
-                                onPressed: () => _deliver(tx),
-                                icon: const Icon(
-                                  Icons.check_circle_rounded,
-                                  size: 18,
-                                ),
-                                label: const Text("✓ تسليم الآن"),
+                                if (entry != totals.last)
+                                  const SizedBox(width: 10),
+                              ],
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  if (_pendingTransactions.isEmpty)
+                    SliverFillRemaining(
+                      hasScrollBody: false,
+                      child: TimaEmptyState(
+                        icon: Icons.check_circle_outline_rounded,
+                        title: 'الصندوق مرتاح حالياً',
+                        subtitle: 'جميع حركات التسليم تم إنهاؤها أو إلغاؤها.',
+                        action: FilledButton.icon(
+                          onPressed: _openImport,
+                          icon: const Icon(Icons.upload_file_rounded),
+                          label: const Text('استيراد حركات من Excel'),
+                        ),
+                      ),
+                    )
+                  else
+                    SliverPadding(
+                      padding: const EdgeInsets.fromLTRB(
+                        AppDims.pagePadding,
+                        12,
+                        AppDims.pagePadding,
+                        24,
+                      ),
+                      sliver: SliverList(
+                        delegate: SliverChildBuilderDelegate(
+                          (context, index) {
+                            final tx = _pendingTransactions[index];
+                            return TimaContentWidth(
+                              child: _PendingRow(
+                                key: ValueKey('pending-${tx.id}'),
+                                index: index,
+                                transaction: tx,
+                                currencyCode: _currencyCode,
+                                formatAmount: _formatAmount,
+                                formatDate: _formatDate,
+                                expanded: _expanded.contains(tx.id),
+                                busy: _busyId == tx.id,
+                                onToggle: () => setState(() {
+                                  if (_expanded.contains(tx.id)) {
+                                    _expanded.remove(tx.id);
+                                  } else {
+                                    _expanded.add(tx.id);
+                                  }
+                                }),
+                                onDeliver: () => _deliver(tx),
+                                onEdit: () => _edit(tx),
+                                onCancel: () => _cancel(tx),
+                                loadEdits: () =>
+                                    widget.db.getEditsForTransaction(tx.id),
                               ),
-                            ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: OutlinedButton.icon(
-                                style: OutlinedButton.styleFrom(
-                                  foregroundColor: AppColors.error,
-                                  side: const BorderSide(
-                                    color: AppColors.error,
-                                  ),
-                                  shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(AppDims.radius),
-                                  ),
-                                ),
-                                onPressed: () => _cancel(tx),
-                                icon: const Icon(Icons.cancel, size: 18),
-                                label: const Text("✗ إلغاء الحركة"),
-                              ),
-                            ),
-                          ],
+                            );
+                          },
+                          childCount: _pendingTransactions.length,
                         ),
                       ),
-                      ListTile(
-                        dense: true,
-                        title: const Text("تعديل تفاصيل الحركة المعلقة"),
-                        trailing: IconButton(
-                          icon: const Icon(Icons.edit, color: AppColors.ocean),
-                          onPressed: () => _edit(tx),
-                        ),
-                      ),
-                    ],
-                  ),
-                );
-              },
-            ),
+                    ),
+                ],
+              ),
       ),
     );
   }
@@ -559,4 +540,740 @@ class _PendingRecordsPageState extends State<PendingRecordsPage> {
 class _PendingCurrencyTotal {
   int count = 0;
   double amount = 0;
+}
+
+// ---------------------------------------------------------------------------
+// بطاقة الحركة المعلقة — بنفس تصميم بطاقة سجل الحركات
+// ---------------------------------------------------------------------------
+
+class _PendingRow extends StatefulWidget {
+  final int index;
+  final Transaction transaction;
+  final String Function(int?) currencyCode;
+  final String Function(double) formatAmount;
+  final String Function(DateTime) formatDate;
+  final bool expanded;
+  final bool busy;
+  final VoidCallback onToggle;
+  final VoidCallback onDeliver;
+  final VoidCallback onEdit;
+  final VoidCallback onCancel;
+  final Future<List<Edit>> Function() loadEdits;
+
+  const _PendingRow({
+    super.key,
+    required this.index,
+    required this.transaction,
+    required this.currencyCode,
+    required this.formatAmount,
+    required this.formatDate,
+    required this.expanded,
+    required this.busy,
+    required this.onToggle,
+    required this.onDeliver,
+    required this.onEdit,
+    required this.onCancel,
+    required this.loadEdits,
+  });
+
+  @override
+  State<_PendingRow> createState() => _PendingRowState();
+}
+
+class _PendingRowState extends State<_PendingRow> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final tx = widget.transaction;
+    final tint = AppUi.tone(context, AppColors.warning);
+    final title = tx.beneficiary?.isNotEmpty == true
+        ? tx.beneficiary!
+        : 'مستفيد غير معروف';
+    final amountText =
+        '-${widget.formatAmount(tx.amount)} ${widget.currencyCode(tx.currencyId)}';
+
+    return _Staggered(
+      index: widget.index,
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 10),
+        decoration: AppUi.panelDecoration(
+          context,
+          borderColor: widget.expanded || _hovered
+              ? tint.withValues(alpha: 0.55)
+              : null,
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            MouseRegion(
+              onEnter: (_) => setState(() => _hovered = true),
+              onExit: (_) => setState(() => _hovered = false),
+              child: Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  onTap: widget.onToggle,
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+                    child: Row(
+                      children: [
+                        AnimatedContainer(
+                          duration: const Duration(milliseconds: 180),
+                          width: 4,
+                          height: 46,
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              begin: Alignment.topCenter,
+                              end: Alignment.bottomCenter,
+                              colors: [tint, tint.withValues(alpha: 0.35)],
+                            ),
+                            borderRadius: BorderRadius.circular(3),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        AnimatedContainer(
+                          duration: const Duration(milliseconds: 180),
+                          width: 40,
+                          height: 40,
+                          decoration: BoxDecoration(
+                            color: tint.withValues(
+                              alpha: _hovered || widget.expanded ? 0.20 : 0.12,
+                            ),
+                            borderRadius: BorderRadius.circular(
+                              AppDims.radiusSm,
+                            ),
+                          ),
+                          child: Icon(
+                            Icons.outbox_rounded,
+                            color: tint,
+                            size: 19,
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                title,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  color: AppUi.textPrimary(context),
+                                  fontSize: 13.5,
+                                  fontWeight: FontWeight.w800,
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              SizedBox(
+                                height: 24,
+                                child: AnimatedSwitcher(
+                                  duration: const Duration(milliseconds: 180),
+                                  child: _hovered
+                                      ? _quickActions(context)
+                                      : Row(
+                                          key: const ValueKey('meta'),
+                                          children: [
+                                            Text(
+                                              amountText,
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: TextStyle(
+                                                fontSize: 12.5,
+                                                fontWeight: FontWeight.w800,
+                                                color: AppColors.error,
+                                              ),
+                                            ),
+                                            const SizedBox(width: 10),
+                                            Flexible(
+                                              child: Text(
+                                                '${tx.type} • ${widget.formatDate(tx.createdAt)}',
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
+                                                style: TextStyle(
+                                                  color: AppUi.textSecondary(
+                                                    context,
+                                                  ),
+                                                  fontSize: 11.5,
+                                                ),
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        if (widget.busy)
+                          const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        else
+                          const TimaStatusPill(
+                            key: ValueKey('status-pending'),
+                            label: 'معلقة',
+                            color: AppColors.brandGoldDark,
+                          ),
+                        const SizedBox(width: 6),
+                        AnimatedRotation(
+                          duration: const Duration(milliseconds: 220),
+                          curve: Curves.easeOutCubic,
+                          turns: widget.expanded ? 0.5 : 0,
+                          child: Icon(
+                            Icons.expand_more_rounded,
+                            size: 20,
+                            color: AppUi.textSecondary(context),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            AnimatedSize(
+              duration: const Duration(milliseconds: 260),
+              curve: Curves.easeOutCubic,
+              alignment: Alignment.topCenter,
+              child: widget.expanded
+                  ? _details(context, tint)
+                  : const SizedBox(width: double.infinity),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _quickActions(BuildContext context) {
+    return Row(
+      key: const ValueKey('quick'),
+      children: [
+        _MiniAction(
+          tooltip: 'تسليم الحركة',
+          icon: Icons.check_circle_rounded,
+          color: AppColors.success,
+          onTap: widget.onDeliver,
+        ),
+        _MiniAction(
+          tooltip: 'تعديل الحركة',
+          icon: Icons.edit_outlined,
+          color: AppColors.ocean,
+          onTap: widget.onEdit,
+        ),
+        _MiniAction(
+          tooltip: 'إلغاء الحركة',
+          icon: Icons.cancel_outlined,
+          color: AppColors.error,
+          onTap: widget.onCancel,
+        ),
+        const SizedBox(width: 8),
+        Flexible(
+          child: Text(
+            '-${widget.formatAmount(widget.transaction.amount)} '
+            '${widget.currencyCode(widget.transaction.currencyId)}',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w800,
+              color: AppColors.error,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _details(BuildContext context, Color tint) {
+    final tx = widget.transaction;
+    final has2 = tx.targetAmount != null && tx.targetCurrencyId != null;
+
+    final facts = <Widget>[
+      TimaKeyValue(
+        label: 'تاريخ الإضافة',
+        value: widget.formatDate(tx.createdAt),
+        icon: Icons.schedule_rounded,
+      ),
+      TimaKeyValue(
+        label: 'نوع الحركة',
+        value: tx.type,
+        icon: Icons.outbox_rounded,
+      ),
+      TimaKeyValue(
+        label: 'المبلغ المطلوب تسليمه',
+        value:
+            '${widget.formatAmount(tx.amount)} ${widget.currencyCode(tx.currencyId)}',
+        icon: Icons.paid_outlined,
+        emphasized: true,
+      ),
+      if (has2)
+        TimaKeyValue(
+          label: 'المبلغ الثاني',
+          value:
+              '${widget.formatAmount(tx.targetAmount!)} ${widget.currencyCode(tx.targetCurrencyId)}',
+          icon: Icons.swap_horiz_rounded,
+        ),
+      TimaKeyValue(
+        label: 'مسجّل الحركة',
+        value: tx.createdByName,
+        icon: Icons.person_outline_rounded,
+      ),
+    ];
+
+    return Container(
+      decoration: BoxDecoration(
+        color: AppUi.sunken(context),
+        border: Border(top: BorderSide(color: AppUi.border(context))),
+      ),
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Wrap(
+            spacing: 18,
+            runSpacing: 2,
+            children: [
+              for (final fact in facts) SizedBox(width: 268, child: fact),
+            ],
+          ),
+          if (tx.note != null && tx.note!.trim().isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: AppUi.surface(context),
+                borderRadius: BorderRadius.circular(AppDims.radiusSm),
+                border: Border.all(color: AppUi.border(context)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(
+                        Icons.sticky_note_2_outlined,
+                        size: 14,
+                        color: AppUi.textSecondary(context),
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        'ملاحظة وتفاصيل الحركة',
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w800,
+                          color: AppUi.textSecondary(context),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  SelectableText(
+                    tx.note!.trim(),
+                    style: TextStyle(
+                      fontSize: 12,
+                      height: 1.5,
+                      color: AppUi.textPrimary(context),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              _ActionButton(
+                label: 'تسليم الحركة',
+                icon: Icons.check_circle_rounded,
+                color: AppColors.success,
+                filled: true,
+                onPressed: widget.onDeliver,
+              ),
+              _ActionButton(
+                label: 'تعديل الحركة',
+                icon: Icons.edit_outlined,
+                color: tint,
+                onPressed: widget.onEdit,
+              ),
+              _ActionButton(
+                label: 'إلغاء الحركة',
+                icon: Icons.cancel_outlined,
+                color: AppColors.error,
+                onPressed: widget.onCancel,
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Text(
+            'حركة تسليم معلقة: تُسلَّم أو تُعدَّل أو تُلغى.',
+            style: TextStyle(
+              fontSize: 11,
+              color: AppUi.textSecondary(context),
+            ),
+          ),
+          const SizedBox(height: 8),
+          _auditTrail(context),
+        ],
+      ),
+    );
+  }
+
+  Widget _auditTrail(BuildContext context) {
+    return FutureBuilder<List<Edit>>(
+      future: widget.loadEdits(),
+      builder: (context, snapshot) {
+        final edits = snapshot.data ?? const <Edit>[];
+        if (edits.isEmpty) return const SizedBox.shrink();
+
+        return Container(
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: AppUi.surface(context),
+            borderRadius: BorderRadius.circular(AppDims.radiusSm),
+            border: Border.all(color: AppUi.border(context)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(
+                    Icons.history_toggle_off_rounded,
+                    size: 14,
+                    color: AppUi.textSecondary(context),
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    'سجل التعديلات (${edits.length})',
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w800,
+                      color: AppUi.textSecondary(context),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 6),
+              ...edits.map(
+                (edit) => Padding(
+                  padding: const EdgeInsets.only(bottom: 4),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Container(
+                        width: 6,
+                        height: 6,
+                        margin: const EdgeInsets.only(top: 6),
+                        decoration: BoxDecoration(
+                          color: AppUi.borderStrong(context),
+                          shape: BoxShape.circle,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          '${edit.field}: ${edit.oldValue} ← ${edit.newValue}',
+                          style: TextStyle(
+                            fontSize: 11.5,
+                            color: AppUi.textPrimary(context),
+                          ),
+                        ),
+                      ),
+                      Text(
+                        '${widget.formatDate(edit.editedAt)} • ${edit.editedBy}',
+                        style: TextStyle(
+                          fontSize: 10.5,
+                          color: AppUi.textSecondary(context),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// بطاقة مجموع عملة معلّقة.
+class _CurrencyTotalTile extends StatelessWidget {
+  final String code;
+  final int count;
+  final double amount;
+  final String Function(double) formatAmount;
+
+  const _CurrencyTotalTile({
+    required this.code,
+    required this.count,
+    required this.amount,
+    required this.formatAmount,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final tint = AppUi.tone(context, AppColors.brandGoldDark);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 11),
+      decoration: BoxDecoration(
+        color: AppUi.surface(context),
+        borderRadius: BorderRadius.circular(AppDims.radius),
+        border: Border.all(color: AppUi.border(context)),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 34,
+            height: 34,
+            decoration: BoxDecoration(
+              color: tint.withValues(alpha: 0.14),
+              borderRadius: BorderRadius.circular(AppDims.radiusSm),
+            ),
+            child: Center(
+              child: Text(
+                code,
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w900,
+                  color: tint,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  '$count حركة',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w700,
+                    color: AppUi.textSecondary(context),
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  formatAmount(amount),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 17,
+                    height: 1.05,
+                    fontWeight: FontWeight.w900,
+                    color: AppUi.textPrimary(context),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// زر إجراء مكتوب داخل بطاقة الحركة.
+class _ActionButton extends StatefulWidget {
+  final String label;
+  final IconData icon;
+  final Color color;
+  final bool filled;
+  final VoidCallback onPressed;
+
+  const _ActionButton({
+    required this.label,
+    required this.icon,
+    required this.color,
+    required this.onPressed,
+    this.filled = false,
+  });
+
+  @override
+  State<_ActionButton> createState() => _ActionButtonState();
+}
+
+class _ActionButtonState extends State<_ActionButton> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final tint = AppUi.tone(context, widget.color);
+
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: AnimatedScale(
+        scale: _hovered ? 1.03 : 1,
+        duration: const Duration(milliseconds: 130),
+        curve: Curves.easeOut,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 9),
+          decoration: BoxDecoration(
+            color: widget.filled
+                ? tint.withValues(alpha: _hovered ? 1 : 0.9)
+                : (widget.color.withValues(alpha: _hovered ? 0.18 : 0.10)),
+            borderRadius: BorderRadius.circular(AppDims.radiusSm),
+            border: Border.all(
+              color: widget.filled
+                  ? Colors.transparent
+                  : widget.color.withValues(alpha: 0.42),
+            ),
+          ),
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: widget.onPressed,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  widget.icon,
+                  size: 15,
+                  color: widget.filled ? Colors.white : tint,
+                ),
+                const SizedBox(width: 7),
+                Text(
+                  widget.label,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w800,
+                    color: widget.filled ? Colors.white : tint,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// زر أيقونة صغير يظهر عند مرور الفأرة على الحركة.
+class _MiniAction extends StatefulWidget {
+  final String tooltip;
+  final IconData icon;
+  final Color color;
+  final VoidCallback onTap;
+
+  const _MiniAction({
+    required this.tooltip,
+    required this.icon,
+    required this.color,
+    required this.onTap,
+  });
+
+  @override
+  State<_MiniAction> createState() => _MiniActionState();
+}
+
+class _MiniActionState extends State<_MiniAction> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final tint = AppUi.tone(context, widget.color);
+
+    return Tooltip(
+      message: widget.tooltip,
+      waitDuration: const Duration(milliseconds: 350),
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        onEnter: (_) => setState(() => _hovered = true),
+        onExit: (_) => setState(() => _hovered = false),
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: widget.onTap,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 140),
+            margin: const EdgeInsets.only(left: 6),
+            width: 26,
+            height: 24,
+            decoration: BoxDecoration(
+              color: widget.color.withValues(alpha: _hovered ? 0.20 : 0.10),
+              borderRadius: BorderRadius.circular(AppDims.radiusSm),
+              border: Border.all(
+                color: widget.color.withValues(alpha: _hovered ? 0.55 : 0.25),
+              ),
+            ),
+            child: Icon(widget.icon, size: 14, color: tint),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// ظهور تدريجي متدرّج لعناصر القائمة.
+class _Staggered extends StatefulWidget {
+  final int index;
+  final Widget child;
+
+  const _Staggered({required this.index, required this.child});
+
+  @override
+  State<_Staggered> createState() => _StaggeredState();
+}
+
+class _StaggeredState extends State<_Staggered>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 360),
+    );
+    _play();
+  }
+
+  Future<void> _play() async {
+    await Future<void>.delayed(
+      Duration(milliseconds: (widget.index % 12) * 26),
+    );
+    if (mounted) _controller.forward();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final curved = CurvedAnimation(parent: _controller, curve: Curves.easeOut);
+
+    return FadeTransition(
+      opacity: curved,
+      child: SlideTransition(
+        position: Tween<Offset>(
+          begin: const Offset(0, 0.05),
+          end: Offset.zero,
+        ).animate(
+          CurvedAnimation(parent: _controller, curve: Curves.easeOutCubic),
+        ),
+        child: widget.child,
+      ),
+    );
+  }
 }
