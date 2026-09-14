@@ -1,8 +1,13 @@
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:intl/intl.dart' hide TextDirection;
 
+import '../../../core/services/app_sound.dart';
 import '../../../core/storage/app_database.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_theme.dart';
+import '../../../core/utils/balances_image.dart';
 import '../../../core/utils/cashbox_balance.dart';
 import '../../../core/utils/currency_denoms.dart';
 import '../../widgets/app_ui.dart';
@@ -26,7 +31,20 @@ class _CashboxPageState extends State<CashboxPage>
   bool _showAfterDelivery = false;
   int _refreshToken = 0;
 
+  /// طريقة ترتيب الأرصدة: code | high | low | name
+  String _sortMode = 'code';
+
+  /// يمنع تكرار الضغط أثناء توليد الصورة.
+  bool _busy = false;
+
   static const _boxes = ['كامل', 'حركات', 'صرف'];
+
+  static const _sortLabels = {
+    'code': 'حسب العملة',
+    'high': 'الأعلى رصيداً',
+    'low': 'الأقل رصيداً',
+    'name': 'حسب الاسم',
+  };
 
   @override
   void initState() {
@@ -44,6 +62,126 @@ class _CashboxPageState extends State<CashboxPage>
   }
 
   void _refresh() => setState(() => _refreshToken++);
+
+  double _balanceOf(CurrencyCashSummary x) =>
+      _showAfterDelivery ? x.afterDeliveryTotal : x.currentTotal;
+
+  List<CurrencyCashSummary> _sorted(List<CurrencyCashSummary> list) {
+    switch (_sortMode) {
+      case 'high':
+        list.sort((a, b) => _balanceOf(b).compareTo(_balanceOf(a)));
+      case 'low':
+        list.sort((a, b) => _balanceOf(a).compareTo(_balanceOf(b)));
+      case 'name':
+        list.sort((a, b) => a.displayName.compareTo(b.displayName));
+      default:
+        list.sort((a, b) => a.currency.code.compareTo(b.currency.code));
+    }
+    return list;
+  }
+
+  /// يبني صفوف الصورة/النص من بيانات صندوق معيّن.
+  Future<List<BalanceImageRow>> _buildRows(String box) async {
+    final data = await CashboxBalanceCalculator.calculate(
+      widget.db,
+      boxType: box,
+    );
+    return _sorted(data.values.toList()).map((it) {
+      return BalanceImageRow(
+        code: it.currency.code,
+        name: it.displayName,
+        amount: _balanceOf(it),
+        secondary:
+            _showAfterDelivery ? it.currentTotal : it.afterDeliveryTotal,
+        secondaryLabel: _showAfterDelivery ? 'الحالي' : 'بعد التسليم',
+        impact: it.afterDeliveryTotal - it.currentTotal,
+      );
+    }).toList();
+  }
+
+  String get _currentBox => _boxes[_tabController.index];
+
+  /// ينشئ صورة أنيقة للأرصدة ويتيح حفظها/مشاركتها.
+  Future<void> _shareImage() async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    final messenger = ScaffoldMessenger.of(context);
+    final okColor = AppUi.tone(context, AppColors.success);
+    final errColor = AppUi.tone(context, AppColors.error);
+    final box = _currentBox;
+    final mode = _modeLabel;
+    final title = _boxTitle(box);
+    try {
+      final rows = await _buildRows(box);
+      if (rows.isEmpty) {
+        _toast(messenger, 'لا توجد عملات لتصويرها', errColor);
+        return;
+      }
+      final bytes = await renderBalancesImage(
+        rows: rows,
+        boxTitle: title,
+        modeLabel: mode,
+      );
+      final stamp = DateFormat('yyyyMMdd_HHmm').format(DateTime.now());
+      final path = await FilePicker.saveFile(
+        dialogTitle: 'حفظ صورة الأرصدة',
+        fileName: 'tima_balances_$stamp.png',
+        type: FileType.image,
+        allowedExtensions: const ['png'],
+        bytes: bytes,
+      );
+      if (path != null && path.isNotEmpty) {
+        AppSound.play(TimaSound.success);
+        _toast(messenger, 'تم حفظ صورة الأرصدة', okColor);
+      }
+    } catch (e) {
+      AppSound.play(TimaSound.error);
+      _toast(messenger, 'تعذّر إنشاء الصورة: $e', errColor);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  /// ينسخ ملخّص الأرصدة كنص إلى الحافظة.
+  Future<void> _copyText() async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    final messenger = ScaffoldMessenger.of(context);
+    final okColor = AppUi.tone(context, AppColors.success);
+    final errColor = AppUi.tone(context, AppColors.error);
+    final box = _currentBox;
+    final mode = _modeLabel;
+    final title = _boxTitle(box);
+    try {
+      final rows = await _buildRows(box);
+      final text = balancesToText(
+        rows: rows,
+        boxTitle: title,
+        modeLabel: mode,
+      );
+      await Clipboard.setData(ClipboardData(text: text));
+      AppSound.play(TimaSound.success);
+      _toast(messenger, 'تم نسخ الأرصدة إلى الحافظة', okColor);
+    } catch (e) {
+      AppSound.play(TimaSound.error);
+      _toast(messenger, 'تعذّر النسخ: $e', errColor);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  void _toast(ScaffoldMessengerState messenger, String msg, Color color) {
+    messenger
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(msg),
+          backgroundColor: color,
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 3),
+        ),
+      );
+  }
 
   Future<void> _openCurrencyDetail(Currency currency, String boxType) async {
     await Navigator.of(context).pushNamed(
@@ -69,6 +207,22 @@ class _CashboxPageState extends State<CashboxPage>
         title: 'الصناديق والأرصدة',
         actions: [
           IconButton(
+            tooltip: 'مشاركة/حفظ صورة الأرصدة',
+            onPressed: _busy ? null : _shareImage,
+            icon: _busy
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.image_outlined),
+          ),
+          IconButton(
+            tooltip: 'نسخ الأرصدة كنص',
+            onPressed: _busy ? null : _copyText,
+            icon: const Icon(Icons.copy_all_rounded),
+          ),
+          IconButton(
             tooltip: 'تحديث',
             onPressed: _refresh,
             icon: const Icon(Icons.refresh_rounded),
@@ -87,33 +241,86 @@ class _CashboxPageState extends State<CashboxPage>
                 0,
               ),
               child: TimaContentWidth(
-                child: TimaPanel(
-                  padding: const EdgeInsets.all(12),
-                  child: Wrap(
-                    spacing: 14,
-                    runSpacing: 12,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    alignment: WrapAlignment.spaceBetween,
-                    children: [
-                      SegmentedButton<bool>(
-                        segments: const [
-                          ButtonSegment<bool>(
-                            value: false,
-                            icon: Icon(Icons.account_balance_wallet_outlined),
-                            label: Text('الرصيد الحالي'),
-                          ),
-                          ButtonSegment<bool>(
-                            value: true,
-                            icon: Icon(Icons.schedule_rounded),
-                            label: Text('بعد التسليم'),
-                          ),
-                        ],
-                        selected: {_showAfterDelivery},
-                        showSelectedIcon: false,
-                        onSelectionChanged: (value) =>
-                            setState(() => _showAfterDelivery = value.first),
+              child: TimaPanel(
+                padding: const EdgeInsets.all(12),
+                child: Row(
+                  children: [
+                    SegmentedButton<bool>(
+                      segments: const [
+                        ButtonSegment<bool>(
+                          value: false,
+                          icon: Icon(Icons.account_balance_wallet_outlined),
+                          label: Text('الرصيد الحالي'),
+                        ),
+                        ButtonSegment<bool>(
+                          value: true,
+                          icon: Icon(Icons.schedule_rounded),
+                          label: Text('بعد التسليم'),
+                        ),
+                      ],
+                      selected: {_showAfterDelivery},
+                      showSelectedIcon: false,
+                      onSelectionChanged: (value) =>
+                          setState(() => _showAfterDelivery = value.first),
+                    ),
+                    const SizedBox(width: 14),
+
+                    // ترتيب الأرصدة.
+                    Container(
+                      decoration: BoxDecoration(
+                        color: AppUi.sunken(context),
+                        borderRadius:
+                            BorderRadius.circular(AppDims.radiusSm),
+                        border: Border.all(color: AppUi.border(context)),
                       ),
-                      Row(
+                      child: PopupMenuButton<String>(
+                        initialValue: _sortMode,
+                        tooltip: 'ترتيب الأرصدة',
+                        onSelected: (v) => setState(() => _sortMode = v),
+                        itemBuilder: (context) => _sortLabels.entries
+                            .map(
+                              (e) => PopupMenuItem<String>(
+                                value: e.key,
+                                child: Text(e.value),
+                              ),
+                            )
+                            .toList(),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 10,
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.sort_rounded,
+                                size: 16,
+                                color: AppUi.textSecondary(context),
+                              ),
+                              const SizedBox(width: 6),
+                              Text(
+                                _sortLabels[_sortMode]!,
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w700,
+                                  color: AppUi.textPrimary(context),
+                                ),
+                              ),
+                              Icon(
+                                Icons.arrow_drop_down_rounded,
+                                size: 18,
+                                color: AppUi.textSecondary(context),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                    const Spacer(),
+
+                    Flexible(
+                      child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           Icon(
@@ -124,17 +331,22 @@ class _CashboxPageState extends State<CashboxPage>
                             color: AppUi.textSecondary(context),
                           ),
                           const SizedBox(width: 7),
-                          Text(
-                            _showAfterDelivery
-                                ? 'الرصيد المتوقع بعد تنفيذ كل الحركات المعلّقة'
-                                : 'الرصيد الفعلي الموجود في الصندوق الآن',
-                            style: Theme.of(context).textTheme.bodySmall,
+                          Flexible(
+                            child: Text(
+                              _showAfterDelivery
+                                  ? 'الرصيد المتوقع بعد تنفيذ كل الحركات المعلّقة'
+                                  : 'الرصيد الفعلي الموجود في الصندوق الآن',
+                              overflow: TextOverflow.ellipsis,
+                              style:
+                                  Theme.of(context).textTheme.bodySmall,
+                            ),
                           ),
                         ],
                       ),
-                    ],
-                  ),
+                    ),
+                  ],
                 ),
+              ),
               ),
             ),
 
@@ -179,11 +391,14 @@ class _CashboxPageState extends State<CashboxPage>
                 children: [
                   for (final box in _boxes)
                     _CurrencyGrid(
-                      key: ValueKey('$box-$_refreshToken-$_showAfterDelivery'),
+                      key: ValueKey(
+                        '$box-$_refreshToken-$_showAfterDelivery-$_sortMode',
+                      ),
                       db: widget.db,
                       boxType: box,
                       showAfterDelivery: _showAfterDelivery,
                       modeLabel: _modeLabel,
+                      sortMode: _sortMode,
                       onOpen: (c) => _openCurrencyDetail(c, box),
                       onRefresh: _refresh,
                     ),
@@ -256,6 +471,7 @@ class _CurrencyGrid extends StatelessWidget {
   final String boxType;
   final bool showAfterDelivery;
   final String modeLabel;
+  final String sortMode;
   final ValueChanged<Currency> onOpen;
   final VoidCallback onRefresh;
 
@@ -265,6 +481,7 @@ class _CurrencyGrid extends StatelessWidget {
     required this.boxType,
     required this.showAfterDelivery,
     required this.modeLabel,
+    required this.sortMode,
     required this.onOpen,
     required this.onRefresh,
   });
@@ -278,8 +495,19 @@ class _CurrencyGrid extends StatelessWidget {
           return const TimaLoader(message: 'جارٍ حساب الأرصدة…');
         }
 
-        final list = snapshot.data!.values.toList()
-          ..sort((a, b) => a.currency.code.compareTo(b.currency.code));
+        final list = snapshot.data!.values.toList();
+        double bal(CurrencyCashSummary x) =>
+            showAfterDelivery ? x.afterDeliveryTotal : x.currentTotal;
+        switch (sortMode) {
+          case 'high':
+            list.sort((a, b) => bal(b).compareTo(bal(a)));
+          case 'low':
+            list.sort((a, b) => bal(a).compareTo(bal(b)));
+          case 'name':
+            list.sort((a, b) => a.displayName.compareTo(b.displayName));
+          default:
+            list.sort((a, b) => a.currency.code.compareTo(b.currency.code));
+        }
 
         if (list.isEmpty) {
           return TimaEmptyState(
