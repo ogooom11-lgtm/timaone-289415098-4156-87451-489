@@ -4,6 +4,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart' hide TextDirection;
+import 'package:path_provider/path_provider.dart';
 
 import '../../../core/services/app_sound.dart';
 import '../../../core/storage/app_database.dart';
@@ -113,37 +114,84 @@ class _CashboxPageState extends State<CashboxPage>
     final box = _currentBox;
     final mode = _modeLabel;
     final title = _boxTitle(box);
+    final stamp = DateFormat('yyyyMMdd_HHmm').format(DateTime.now());
+
+    // 1) بناء الصفوف.
+    List<BalanceImageRow> rows;
     try {
-      final rows = await _buildRows(box);
-      if (rows.isEmpty) {
-        _toast(messenger, 'لا توجد عملات لتصويرها', errColor);
-        return;
-      }
-      final bytes = await renderBalancesImage(
-        rows: rows,
-        boxTitle: title,
-        modeLabel: mode,
-      );
-      final stamp = DateFormat('yyyyMMdd_HHmm').format(DateTime.now());
-      final path = await FilePicker.saveFile(
+      rows = await _buildRows(box);
+    } catch (e) {
+      debugPrint('balances image — build rows error: $e');
+      AppSound.play(TimaSound.error);
+      _toast(messenger, 'تعذّر قراءة الأرصدة: $e', errColor);
+      if (mounted) setState(() => _busy = false);
+      return;
+    }
+    if (rows.isEmpty) {
+      _toast(messenger, 'لا توجد عملات لتصويرها', errColor);
+      if (mounted) setState(() => _busy = false);
+      return;
+    }
+
+    // 2) رسم الصورة.
+    Uint8List bytes;
+    try {
+      bytes = await renderBalancesImage(rows: rows, boxTitle: title, modeLabel: mode);
+    } catch (e) {
+      debugPrint('balances image — render error: $e');
+      AppSound.play(TimaSound.error);
+      _toast(messenger, 'تعذّر رسم الصورة: $e', errColor);
+      if (mounted) setState(() => _busy = false);
+      return;
+    }
+
+    // 3) اختيار مكان الحفظ (نافذة) مع بديل آمن: مجلد التنزيلات.
+    String? path;
+    var dialogFailed = false;
+    try {
+      path = await FilePicker.saveFile(
         dialogTitle: 'حفظ صورة الأرصدة',
         fileName: 'tima_balances_$stamp.png',
         type: FileType.custom,
         allowedExtensions: const ['png'],
       );
-      if (path != null && path.isNotEmpty) {
-        // نكتب البايتات مباشرة عبر dart:io (أوثق على ويندوز من تمريرها
-        // للحزمة). نضمن امتداد png حتى لو حذفه المستخدم.
-        var outPath = path;
-        if (!outPath.toLowerCase().endsWith('.png')) outPath = '$outPath.png';
-        await File(outPath).writeAsBytes(bytes, flush: true);
-        AppSound.play(TimaSound.success);
-        _toast(messenger, 'تم حفظ صورة الأرصدة', okColor);
+    } catch (e) {
+      debugPrint('balances image — saveFile error: $e');
+      dialogFailed = true;
+    }
+    // إذا ألغى المستخدم (بدون خطأ) لا نحفظ شيئاً.
+    if (path == null && !dialogFailed) {
+      if (mounted) setState(() => _busy = false);
+      return;
+    }
+    // بديل: مجلد التنزيلات (أو المستندات) إذا فشلت النافذة.
+    if (path == null || path.isEmpty) {
+      try {
+        Directory? dir;
+        try {
+          dir = await getDownloadsDirectory();
+        } catch (_) {}
+        dir ??= await getApplicationDocumentsDirectory();
+        path = '${dir.path}${Platform.pathSeparator}tima_balances_$stamp.png';
+      } catch (e) {
+        debugPrint('balances image — fallback dir error: $e');
+        AppSound.play(TimaSound.error);
+        _toast(messenger, 'تعذّر تحديد مكان الحفظ: $e', errColor);
+        if (mounted) setState(() => _busy = false);
+        return;
       }
-    } catch (e, st) {
-      debugPrint('balances image error: $e\n$st');
+    }
+    if (!path.toLowerCase().endsWith('.png')) path = '$path.png';
+
+    // 4) كتابة الملف.
+    try {
+      await File(path).writeAsBytes(bytes, flush: true);
+      AppSound.play(TimaSound.success);
+      _toast(messenger, 'تم حفظ صورة الأرصدة ✓', okColor);
+    } catch (e) {
+      debugPrint('balances image — write error: $e');
       AppSound.play(TimaSound.error);
-      _toast(messenger, 'تعذّر إنشاء الصورة: $e', errColor);
+      _toast(messenger, 'تعذّر حفظ الصورة: $e', errColor);
     } finally {
       if (mounted) setState(() => _busy = false);
     }

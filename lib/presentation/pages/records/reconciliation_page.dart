@@ -1,12 +1,33 @@
+import 'dart:io';
+
+import 'package:excel/excel.dart' as xls;
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
+import 'package:flutter/services.dart';
+import 'package:intl/intl.dart' hide TextDirection;
+import 'package:printing/printing.dart';
 
 import '../../../core/storage/app_database.dart';
-import '../../../core/storage/device_settings.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../widgets/app_ui.dart';
 
+/// حالة مطابقة العنصر (حركة / صف / علامة).
+enum MatchState { none, matched, notMatched }
+
+enum _FileKind { none, pdf, excel }
+
+/// علامة على صفحة PDF — تُحفظ كنِسب من أبعاد الصفحة لتبقى صحيحة مع أي تكبير.
+class _PdfMark {
+  final double dx;
+  final double dy;
+  final bool matched;
+  const _PdfMark(this.dx, this.dy, this.matched);
+}
+
+/// صفحة مطابقة الصندوق — قسمان:
+///  • قسم الملف (PDF/Excel) مع إمكانية وضع علامات داخل التطبيق (دون تعديل الملف).
+///  • قسم الحركات: زر الفأرة الأيسر = مطابق، الأيمن = غير مطابق.
 class ReconciliationPage extends StatefulWidget {
   final AppDatabase db;
   final User user;
@@ -18,947 +39,1290 @@ class ReconciliationPage extends StatefulWidget {
 }
 
 class _ReconciliationPageState extends State<ReconciliationPage> {
-  bool _loading = true;
-  DateTime _lastMatchDate = DateTime(1970);
-  Map<String, dynamic> _lastMatchBalances = {};
-  String _lastMatchBy = "غير مطابَق بعد";
+  // ---- الملف ----
+  _FileKind _kind = _FileKind.none;
+  String _fileName = '';
+  bool _loadingFile = false;
+  String? _fileError;
+  List<Uint8List> _pdfPages = [];
+  List<Size> _pdfSizes = [];
+  List<List<String>> _excelRows = [];
+  final Map<int, List<_PdfMark>> _pdfMarks = {};
+  final Map<int, MatchState> _excelMarks = {};
 
-  // المخازن الأصلية الكاملة للبيانات
-  List<Transaction> _allTransactions = [];
-  List<Map<String, dynamic>> _allEdits = [];
-
-  // المخازن المفلترة التي سيتم عرضها
-  List<Transaction> _filteredTransactions = [];
-  List<Map<String, dynamic>> _filteredEdits = [];
-
+  // ---- الحركات ----
+  List<Transaction> _transactions = [];
   Map<int, Currency> _currencies = {};
-  Map<int, Transaction> _allTxMap = {};
-  List<Map<String, dynamic>> _matchHistory = [];
-  Set<int> _selectedTransactionIds = <int>{};
+  final Map<int, MatchState> _txState = {};
+  bool _loadingTx = true;
+  String _search = '';
+  bool _onlyUnmarked = false;
 
-  // إعدادات الفلترة الجديدة المطلوبة
-  String _filterMode = "toNow"; // "toNow", "toLastMatch", "customRange"
-  DateTime _startDate = DateTime.now().subtract(const Duration(days: 7));
-  DateTime _endDate = DateTime.now();
+  // ---- التقسيم ----
+  double _split = 0.55;
 
   @override
   void initState() {
     super.initState();
-    _loadData();
+    _loadTx();
   }
 
-  Future<void> _loadData() async {
-    setState(() => _loading = true);
+  Future<void> _loadTx() async {
+    final txs = await widget.db.getAllTransactions();
+    final curs = await widget.db.getAllCurrencies();
+    if (!mounted) return;
+    setState(() {
+      _transactions = txs
+          .where((t) => t.movementState != 'ملغية' && t.status != 'الغاء')
+          .toList()
+        ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+      _currencies = {for (final c in curs) c.id: c};
+      _loadingTx = false;
+    });
+  }
 
-    // 1. تحميل تاريخ المطابقات السابقة
-    final history = await DeviceSettings.getReconciliations();
-    DateTime lastDate = DateTime(1970);
-    Map<String, dynamic> lastBalances = {};
-    String lastBy = "النظام (بداية التشغيل)";
+  // ---------------- الملف ----------------
 
-    if (history.isNotEmpty) {
-      final last = history.last;
-      lastDate = DateTime.parse(last['dateTime']);
-      lastBalances = Map<String, dynamic>.from(last['balances'] ?? {});
-      lastBy = last['matchedBy'] ?? "غير معروف";
-    }
+  Future<void> _openFile() async {
+    final result = await FilePicker.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: const ['pdf', 'xlsx', 'xls'],
+    );
+    if (result == null || result.files.isEmpty) return;
+    final file = result.files.first;
 
-    // 2. تحميل العملات والحركات من الداتابيز
-    final currenciesList = await widget.db.getAllCurrencies();
-    final allTransactions = await widget.db.getAllTransactions();
-    final selection = await DeviceSettings.reconciliationSelection();
+    setState(() {
+      _loadingFile = true;
+      _fileError = null;
+      _fileName = file.name;
+    });
 
-    _currencies = {for (final c in currenciesList) c.id: c};
-    _allTxMap = {for (final t in allTransactions) t.id: t};
-    _allTransactions = allTransactions;
-
-    // 3. تحميل كافة التعديلات التاريخية
-    final List<Map<String, dynamic>> allEditsList = [];
     try {
-      final rawEdits = await widget.db
-          .customSelect('SELECT * FROM edits ORDER BY edited_at DESC')
-          .get();
-      for (final row in rawEdits) {
-        final txId = row.read<int>('transaction_id');
-        final field = row.read<String>('field');
-        final oldValue = row.read<String>('old_value');
-        final newValue = row.read<String>('new_value');
+      Uint8List? bytes = file.bytes;
+      if (bytes == null && file.path != null) {
+        bytes = await File(file.path!).readAsBytes();
+      }
+      if (bytes == null) throw Exception('تعذّر قراءة بايتات الملف');
 
-        final rawDate = row.data['edited_at'];
-        DateTime editedAt = DateTime.now();
-        if (rawDate is int) {
-          editedAt = DateTime.fromMillisecondsSinceEpoch(rawDate * 1000);
-        } else if (rawDate is String) {
-          editedAt = DateTime.parse(rawDate);
+      final ext = file.name.split('.').last.toLowerCase();
+      if (ext == 'pdf') {
+        final pages = <Uint8List>[];
+        final sizes = <Size>[];
+        await for (final p in Printing.raster(bytes, dpi: 130)) {
+          pages.add(await p.toPng());
+          sizes.add(Size(p.width.toDouble(), p.height.toDouble()));
         }
-
-        final editedBy = row.read<String>('edited_by');
-
-        allEditsList.add({
-          'txId': txId,
-          'field': field,
-          'oldValue': oldValue,
-          'newValue': newValue,
-          'editedAt': editedAt,
-          'editedBy': editedBy,
+        if (!mounted) return;
+        setState(() {
+          _kind = _FileKind.pdf;
+          _pdfPages = pages;
+          _pdfSizes = sizes;
+          _pdfMarks.clear();
+        });
+      } else {
+        final excel = xls.Excel.decodeBytes(bytes);
+        final rows = <List<String>>[];
+        if (excel.tables.isNotEmpty) {
+          final sheet = excel.tables.values.first;
+          for (final row in sheet.rows) {
+            rows.add(row.map<String>((c) => _unwrapCell(c)?.toString() ?? '').toList());
+          }
+        }
+        if (!mounted) return;
+        setState(() {
+          _kind = _FileKind.excel;
+          _excelRows = rows;
+          _excelMarks.clear();
         });
       }
     } catch (e) {
-      debugPrint("Error loading edits: $e");
-    }
-
-    _allEdits = allEditsList;
-
-    if (!mounted) return;
-    setState(() {
-      _lastMatchDate = lastDate;
-      _lastMatchBalances = lastBalances;
-      _lastMatchBy = lastBy;
-      _matchHistory = history.reversed.toList(); // عرض الأحدث أولاً
-      _selectedTransactionIds = selection;
-
-      // تطبيق الفلترة لأول مرة
-      _applyDateFilters();
-      _loading = false;
-    });
-  }
-
-  Future<void> _toggleTransactionSelection(int id, bool selected) async {
-    setState(() {
-      if (selected) {
-        _selectedTransactionIds.add(id);
-      } else {
-        _selectedTransactionIds.remove(id);
-      }
-    });
-    await DeviceSettings.saveReconciliationSelection(_selectedTransactionIds);
-  }
-
-  Future<void> _clearTransactionSelection() async {
-    await DeviceSettings.clearReconciliationSelection();
-    if (mounted) setState(() => _selectedTransactionIds.clear());
-  }
-
-  // دالة مخصصة لترجمة الأيام للعربية يدوياً
-  String _formatArabicDate(DateTime date) {
-    final ymd = DateFormat('yyyy-MM-dd').format(date);
-    final weekdayEng = DateFormat('EEEE').format(date);
-    final Map<String, String> weekdaysAr = {
-      'Monday': 'الاثنين',
-      'Tuesday': 'الثلاثاء',
-      'Wednesday': 'الأربعاء',
-      'Thursday': 'الخميس',
-      'Friday': 'الجمعة',
-      'Saturday': 'السبت',
-      'Sunday': 'الأحد',
-    };
-    final arDay = weekdaysAr[weekdayEng] ?? weekdayEng;
-    return "$ymd ($arDay)";
-  }
-
-  // تصفية وفرز الحركات والتعديلات بناءً على الخيارات والتواريخ المحددة
-  void _applyDateFilters() {
-    DateTime start;
-    DateTime end;
-
-    if (_filterMode == "toNow") {
-      start = _lastMatchDate;
-      end = DateTime.now();
-    } else if (_filterMode == "toLastMatch") {
-      start = _startDate;
-      end = _lastMatchDate;
-    } else {
-      // customRange (بين تاريخين مخصصين)
-      start = _startDate;
-      end = _endDate;
-    }
-
-    // لضمان شمول كامل اليوم من البداية للنهاية
-    final filterStart = DateTime(start.year, start.month, start.day, 0, 0, 0);
-    final filterEnd = DateTime(end.year, end.month, end.day, 23, 59, 59);
-
-    _filteredTransactions = _allTransactions.where((t) {
-      return t.createdAt.isAfter(filterStart) &&
-          t.createdAt.isBefore(filterEnd);
-    }).toList();
-
-    _filteredEdits = _allEdits.where((e) {
-      final DateTime editDate = e['editedAt'];
-      return editDate.isAfter(filterStart) && editDate.isBefore(filterEnd);
-    }).toList();
-  }
-
-  Future<void> _pickStartDate() async {
-    final date = await showDatePicker(
-      context: context,
-      initialDate: _startDate,
-      firstDate: DateTime(2020),
-      lastDate: DateTime.now(),
-    );
-    if (date != null) {
-      setState(() {
-        _startDate = date;
-        _applyDateFilters();
-      });
-    }
-  }
-
-  Future<void> _pickEndDate() async {
-    final date = await showDatePicker(
-      context: context,
-      initialDate: _endDate,
-      firstDate: DateTime(2020),
-      lastDate: DateTime.now(),
-    );
-    if (date != null) {
-      setState(() {
-        _endDate = date;
-        _applyDateFilters();
-      });
-    }
-  }
-
-  // حساب الأرصدة الحالية للصندوق بالكامل
-  Future<Map<String, double>> _calculateCurrentBalances() async {
-    final currencies = await widget.db.getAllCurrencies();
-    final transactions = await widget.db.getAllTransactions();
-    final Map<String, double> currentBalances = {};
-
-    for (final c in currencies) {
-      currentBalances[c.code] = 0.0;
-    }
-
-    for (final tx in transactions) {
-      if (tx.movementState == "ملغية" ||
-          tx.status == "الغاء" ||
-          tx.status == "ملغية") {
-        continue;
-      }
-
-      final currency = _currencies[tx.currencyId];
-      if (currency == null) continue;
-
-      final type = tx.type;
-
-      // 1. حركة تسليم
-      if (type == "حركة تسليم" || type.contains("تسليم")) {
-        if (tx.status == "تم التسليم") {
-          currentBalances[currency.code] =
-              (currentBalances[currency.code] ?? 0.0) - tx.amount;
-        }
-      }
-      // 2. حركة استلام
-      else if (type == "حركة استلام" || type.contains("استلام")) {
-        currentBalances[currency.code] =
-            (currentBalances[currency.code] ?? 0.0) + tx.amount;
-      }
-      // 3. حركة مرسلة — المستلم والأجور فقط. المرسل لا يؤثّر على الرصيد.
-      else if (type == "حركة مرسلة" || type.contains("مرسلة")) {
-        currentBalances[currency.code] =
-            (currentBalances[currency.code] ?? 0.0) + tx.amount;
-        if (tx.feesCurrencyId != null && tx.fees != null) {
-          final feesCurrency = _currencies[tx.feesCurrencyId!];
-          if (feesCurrency != null) {
-            currentBalances[feesCurrency.code] =
-                (currentBalances[feesCurrency.code] ?? 0.0) + tx.fees!;
-          }
-        }
-      }
-      // 4. حركة تسوية (صرف)
-      else if (type == "حركة تسوية" || type.contains("صرف")) {
-        currentBalances[currency.code] =
-            (currentBalances[currency.code] ?? 0.0) - tx.amount;
-        if (tx.targetCurrencyId != null && tx.targetAmount != null) {
-          final targetCurrency = _currencies[tx.targetCurrencyId!];
-          if (targetCurrency != null) {
-            currentBalances[targetCurrency.code] =
-                (currentBalances[targetCurrency.code] ?? 0.0) +
-                tx.targetAmount!;
-          }
-        }
-      }
-      // 5. حركة يوزر
-      else if (type == "حركة يوزر" || type.contains("يوزر")) {
-        currentBalances[currency.code] =
-            (currentBalances[currency.code] ?? 0.0) - tx.amount;
-      }
-    }
-
-    return currentBalances;
-  }
-
-  Future<void> _confirmMatching() async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Row(
-          children: [
-            Icon(Icons.verified_user_rounded, color: AppColors.success),
-            SizedBox(width: 8),
-            Text("تأكيد مطابقة الرصيد والمسؤول"),
-          ],
-        ),
-        content: Text(
-          "هل أنت متأكد من مطابقة الأرصدة الآن؟ سيتم تسجيل اسمك كمستخدم مطابق [${widget.user.username}] وحفظ الأرصدة الحالية كمطابقة جديدة وتصفير كشف الحركات الجديدة.",
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text("إلغاء"),
-          ),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: AppColors.success),
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text("تأكيد ومطابقة"),
-          ),
-        ],
-      ),
-    );
-
-    if (confirmed == true) {
-      setState(() => _loading = true);
-
-      // حساب الأرصدة الحالية
-      final currentBalances = await _calculateCurrentBalances();
-
-      // بناء سجل المطابقة الجديد وتوثيق اسم المستخدم المطابق بدقة
-      final newMatch = {
-        'id': DateTime.now().millisecondsSinceEpoch,
-        'dateTime': DateTime.now().toIso8601String(),
-        'matchedBy': widget.user.username, // حفظ اسم المستخدم بدقة
-        'balances': currentBalances,
-        'selectedTransactionIds': _selectedTransactionIds.toList(),
-      };
-
-      final history = await DeviceSettings.getReconciliations();
-      history.add(newMatch);
-      await DeviceSettings.saveReconciliations(history);
-
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
+      setState(() {
+        _kind = _FileKind.none;
+        _fileError = '$e';
+      });
+      _toast('تعذّر فتح الملف: $e', false);
+    } finally {
+      if (mounted) setState(() => _loadingFile = false);
+    }
+  }
+
+  dynamic _unwrapCell(dynamic raw) {
+    if (raw == null) return null;
+    try {
+      final dynamic value = (raw as dynamic).value;
+      if (value is xls.TextCellValue) return value.value;
+      if (value is xls.IntCellValue) return value.value;
+      if (value is xls.DoubleCellValue) return value.value;
+      if (value is xls.BoolCellValue) return value.value;
+      if (value is xls.FormulaCellValue) return value.formula;
+      if (value is num || value is String || value is bool) return value;
+      if (value != null && value != raw) return _unwrapCell(value);
+    } catch (_) {}
+    if (raw is xls.TextCellValue) return raw.value;
+    if (raw is xls.IntCellValue) return raw.value;
+    if (raw is xls.DoubleCellValue) return raw.value;
+    if (raw is xls.BoolCellValue) return raw.value;
+    if (raw is xls.FormulaCellValue) return raw.formula;
+    if (raw is num || raw is String || raw is bool) return raw;
+    return raw.toString();
+  }
+
+  // ---------------- العلامات ----------------
+
+  void _toggle(Map<int, MatchState> map, int key, MatchState s) {
+    setState(() {
+      if (map[key] == s) {
+        map.remove(key);
+      } else {
+        map[key] = s;
+      }
+    });
+  }
+
+  void _markTx(int id, MatchState s) => _toggle(_txState, id, s);
+  void _markRow(int i, MatchState s) => _toggle(_excelMarks, i, s);
+
+  void _addPdfMark(int page, double dx, double dy, bool matched) {
+    setState(() {
+      (_pdfMarks[page] ??= <_PdfMark>[]).add(_PdfMark(dx, dy, matched));
+    });
+  }
+
+  void _clearPageMarks(int page) => setState(() => _pdfMarks.remove(page));
+
+  void _resetAll() {
+    setState(() {
+      _txState.clear();
+      _excelMarks.clear();
+      _pdfMarks.clear();
+    });
+    _toast('تم مسح كل العلامات', true);
+  }
+
+  // ---------------- النسخ المتقدم ----------------
+
+  String _code(int? id) => id == null ? '' : (_currencies[id]?.code ?? '');
+
+  String _fmt(double v) {
+    final t = v == v.roundToDouble() ? v.toStringAsFixed(0) : v.toStringAsFixed(2);
+    return t;
+  }
+
+  Future<void> _copyReport() async {
+    final matched = <Transaction>[];
+    final notMatched = <Transaction>[];
+    for (final t in _transactions) {
+      final s = _txState[t.id];
+      if (s == MatchState.matched) {
+        matched.add(t);
+      } else if (s == MatchState.notMatched) {
+        notMatched.add(t);
+      }
+    }
+    final unmarked = _transactions.length - matched.length - notMatched.length;
+
+    String line(Transaction t) {
+      final when = DateFormat('MM-dd HH:mm').format(t.createdAt.toLocal());
+      return '• ${t.beneficiary ?? t.type} — ${_fmt(t.amount)} ${_code(t.currencyId)} ($when)';
+    }
+
+    final excelMatched =
+        _excelMarks.values.where((s) => s == MatchState.matched).length;
+    final excelNot =
+        _excelMarks.values.where((s) => s == MatchState.notMatched).length;
+    final pdfMarks = _pdfMarks.values.fold<int>(0, (a, b) => a + b.length);
+
+    final b = StringBuffer()
+      ..writeln('🧾 تقرير مطابقة الصندوق')
+      ..writeln('المستخدم: ${widget.user.username}')
+      ..writeln('التاريخ: ${DateFormat('yyyy/MM/dd  HH:mm').format(DateTime.now())}')
+      ..writeln('الملف: ${_fileName.isEmpty ? '—' : _fileName}')
+      ..writeln('=======================================')
+      ..writeln('الحركات المطابقة (${matched.length}):');
+    for (final t in matched) {
+      b.writeln(line(t));
+    }
+    b
+      ..writeln('')
+      ..writeln('الحركات غير المطابقة (${notMatched.length}):');
+    for (final t in notMatched) {
+      b.writeln(line(t));
+    }
+    b
+      ..writeln('')
+      ..writeln('بدون علامة: $unmarked')
+      ..writeln('---------------------------------------')
+      ..writeln('علامات الملف: Excel مطابق $excelMatched / غير مطابق $excelNot'
+          '${_kind == _FileKind.pdf ? ' • علامات PDF: $pdfMarks' : ''}');
+
+    await Clipboard.setData(ClipboardData(text: b.toString()));
+    if (!mounted) return;
+    _toast('تم نسخ تقرير المطابقة', true);
+  }
+
+  void _toast(String msg, bool ok) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
         SnackBar(
-          content: Text(
-            "✓ تم توثيق مطابقة الرصيد بنجاح بواسطة المستخدم المطابق: [${widget.user.username}]",
-          ),
-          backgroundColor: AppColors.success,
+          content: Text(msg),
+          behavior: SnackBarBehavior.floating,
+          backgroundColor: ok
+              ? AppUi.tone(context, AppColors.success)
+              : AppUi.tone(context, AppColors.error),
         ),
       );
-
-      await _loadData();
-    }
   }
 
-  String _formatDateStr(String isoString) {
-    return DateFormat(
-      "yyyy-MM-dd HH:mm",
-    ).format(DateTime.parse(isoString).toLocal());
-  }
+  // ---------------- الواجهة ----------------
 
   @override
   Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final matched = _txState.values.where((s) => s == MatchState.matched).length;
+    final notMatched =
+        _txState.values.where((s) => s == MatchState.notMatched).length;
 
     return Scaffold(
       backgroundColor: Colors.transparent,
       appBar: timaMaybeAppBar(
         context,
-        title: "جرد ومطابقة وإغلاق الأرصدة",
+        title: 'مطابقة الصندوق',
         actions: [
-          if (_selectedTransactionIds.isNotEmpty)
-            TextButton.icon(
-              onPressed: _clearTransactionSelection,
-              icon: const Icon(Icons.undo_rounded),
-              label: Text(
-                'تراجع عن التحديد (${_selectedTransactionIds.length})',
-              ),
-            ),
+          IconButton(
+            tooltip: 'فتح ملف (PDF / Excel)',
+            onPressed: _loadingFile ? null : _openFile,
+            icon: const Icon(Icons.folder_open_rounded),
+          ),
+          IconButton(
+            tooltip: 'نسخ تقرير المطابقة',
+            onPressed: _copyReport,
+            icon: const Icon(Icons.copy_all_rounded),
+          ),
+          IconButton(
+            tooltip: 'مسح كل العلامات',
+            onPressed: _resetAll,
+            icon: const Icon(Icons.layers_clear_rounded),
+          ),
+          IconButton(
+            tooltip: 'تحديث الحركات',
+            onPressed: _loadTx,
+            icon: const Icon(Icons.refresh_rounded),
+          ),
         ],
       ),
       body: TimaPageBackground(
-        child: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : ListView(
-              padding: const EdgeInsets.all(16),
-              children: [
-                const TimaHeaderPanel(
-                  icon: Icons.fact_check_rounded,
-                  title: 'مطابقة وإغلاق الصندوق',
-                  subtitle: 'راجع الحركات ثم وثّق الأرصدة الحالية كمطابقة معتمدة.',
+        child: Column(
+          children: [
+            _SummaryBar(
+              fileName: _fileName,
+              kind: _kind,
+              total: _transactions.length,
+              matched: matched,
+              notMatched: notMatched,
+              onOpen: _loadingFile ? null : _openFile,
+              loading: _loadingFile,
+            ),
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  AppDims.pagePadding,
+                  4,
+                  AppDims.pagePadding,
+                  AppDims.pagePadding,
                 ),
-                const SizedBox(height: 16),
-                // Section: last matched state banner
-                Card(
-                  color: isDark
-                      ? AppColors.darkSecondaryBackground
-                      : AppColors.lightSecondaryBackground,
-                  elevation: 0,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(AppDims.radius),
-                    side: BorderSide(color: AppUi.border(context)),
-                  ),
-                  child: Padding(
-                    padding: const EdgeInsets.all(16),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+                child: LayoutBuilder(
+                  builder: (context, constraints) {
+                    final total = constraints.maxWidth;
+                    final fileW = (total - 10) * _split;
+                    return Row(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        Row(
-                          children: [
-                            const Icon(
-                              Icons.verified_rounded,
-                              color: AppColors.success,
-                              size: 24,
-                            ),
-                            const SizedBox(width: 8),
-                            const Text(
-                              "حالة المطابقة السابقة والمعتمدة",
-                              style: TextStyle(
-                                fontWeight: FontWeight.bold,
-                                fontSize: 15,
-                              ),
-                            ),
-                          ],
-                        ),
-                        const Divider(height: 20),
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            const Text(
-                              "تاريخ آخر مطابقة:",
-                              style: TextStyle(
-                                color: AppColors.neutral500,
-                                fontSize: 13,
-                              ),
-                            ),
-                            Text(
-                              _lastMatchDate == DateTime(1970)
-                                  ? "لم تجر أي مطابقة بعد"
-                                  : _formatArabicDate(_lastMatchDate),
-                              style: const TextStyle(
-                                fontWeight: FontWeight.bold,
-                                fontSize: 13,
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 6),
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            const Text(
-                              "المسؤول المطابق السابق:",
-                              style: TextStyle(
-                                color: AppColors.neutral500,
-                                fontSize: 13,
-                              ),
-                            ),
-                            Text(
-                              _lastMatchBy,
-                              style: const TextStyle(
-                                fontWeight: FontWeight.bold,
-                                color: AppColors.brandGoldDark,
-                              ),
-                            ),
-                          ],
-                        ),
-                        if (_lastMatchBalances.isNotEmpty) ...[
-                          const SizedBox(height: 8),
-                          const Text(
-                            "الأرصدة المغلقة عند آخر مطابقة:",
-                            style: TextStyle(
-                              fontWeight: FontWeight.bold,
-                              fontSize: 12,
-                              color: AppColors.neutral500,
-                            ),
+                        SizedBox(
+                          width: fileW,
+                          child: _FilePanel(
+                            kind: _kind,
+                            fileName: _fileName,
+                            error: _fileError,
+                            pdfPages: _pdfPages,
+                            pdfSizes: _pdfSizes,
+                            pdfMarks: _pdfMarks,
+                            excelRows: _excelRows,
+                            excelMarks: _excelMarks,
+                            onOpen: _loadingFile ? null : _openFile,
+                            onMarkRow: _markRow,
+                            onAddPdfMark: _addPdfMark,
+                            onClearPageMarks: _clearPageMarks,
                           ),
-                          const SizedBox(height: 4),
-                          Wrap(
-                            spacing: 8,
-                            runSpacing: 4,
-                            children: _lastMatchBalances.entries.map((e) {
-                              return Chip(
-                                visualDensity: VisualDensity.compact,
-                                backgroundColor: AppColors.brandGold
-                                    .withValues(alpha: 0.08),
-                                label: Text(
-                                  "${e.key}: ${e.value.toStringAsFixed(2)}",
-                                  style: const TextStyle(
-                                    fontSize: 11,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                              );
-                            }).toList(),
-                          ),
-                        ],
-                      ],
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 20),
-
-                // FILTRATION OPTIONS CARD (جديد وبمنتهى الجودة!)
-                Card(
-                  elevation: 0,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(AppDims.radius),
-                    side: BorderSide(color: AppUi.border(context)),
-                  ),
-                  child: Padding(
-                    padding: const EdgeInsets.all(16),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Row(
-                          children: [
-                            Icon(
-                              Icons.date_range_rounded,
-                              color: AppColors.brandGold,
-                              size: 20,
-                            ),
-                            SizedBox(width: 8),
-                            Text(
-                              "خيارات تصفية وعرض حركات المطابقة",
-                              style: TextStyle(
-                                fontWeight: FontWeight.bold,
-                                fontSize: 13,
-                              ),
-                            ),
-                          ],
                         ),
-                        const SizedBox(height: 12),
-                        DropdownButtonFormField<String>(
-                          value: _filterMode,
-                          decoration: const InputDecoration(
-                            labelText: "تحديد فترة العرض",
-                          ),
-                          items: const [
-                            DropdownMenuItem(
-                              value: "toNow",
-                              child: Text("من آخر مطابقة للآن"),
-                            ),
-                            DropdownMenuItem(
-                              value: "toLastMatch",
-                              child: Text("من تاريخ مخصص لآخر مطابقة"),
-                            ),
-                            DropdownMenuItem(
-                              value: "customRange",
-                              child: Text("بين تاريخين مخصصين"),
-                            ),
-                          ],
-                          onChanged: (value) {
+                        _SplitHandle(
+                          total: total,
+                          onDrag: (dx) {
                             setState(() {
-                              _filterMode = value ?? "toNow";
-                              _applyDateFilters();
+                              // في RTL لوحة الملف يميناً: سحب المقبض يميناً يصغّرها.
+                              _split = (_split - dx / total)
+                                  .clamp(0.25, 0.75)
+                                  .toDouble();
                             });
                           },
                         ),
-
-                        if (_filterMode != "toNow") ...[
-                          const SizedBox(height: 16),
-                          Row(
-                            children: [
-                              Expanded(
-                                child: OutlinedButton.icon(
-                                  onPressed: _pickStartDate,
-                                  icon: const Icon(Icons.event),
-                                  label: Text(
-                                    "البداية: ${DateFormat('yyyy-MM-dd').format(_startDate)}",
-                                    style: const TextStyle(fontSize: 12),
-                                  ),
-                                ),
-                              ),
-                              if (_filterMode == "customRange") ...[
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: OutlinedButton.icon(
-                                    onPressed: _pickEndDate,
-                                    icon: const Icon(Icons.event),
-                                    label: Text(
-                                      "النهاية: ${DateFormat('yyyy-MM-dd').format(_endDate)}",
-                                      style: const TextStyle(fontSize: 12),
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ],
+                        Expanded(
+                          child: _TxPanel(
+                            loading: _loadingTx,
+                            transactions: _filteredTx(),
+                            states: _txState,
+                            currencies: _currencies,
+                            search: _search,
+                            onlyUnmarked: _onlyUnmarked,
+                            onSearch: (v) => setState(() => _search = v),
+                            onToggleUnmarked: (v) =>
+                                setState(() => _onlyUnmarked = v),
+                            onMark: _markTx,
+                            fmt: _fmt,
                           ),
-                        ],
+                        ),
                       ],
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 24),
-
-                // SECTION: New Executed Transactions
-                Row(
-                  children: [
-                    const Icon(
-                      Icons.playlist_add_check_rounded,
-                      color: AppColors.brandGold,
-                      size: 22,
-                    ),
-                    const SizedBox(width: 8),
-                    Text(
-                      "الحركات المالية المنفذة في الفترة المحددة (${_filteredTransactions.length})",
-                      style: const TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 14,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                if (_filteredTransactions.isEmpty)
-                  const Card(
-                    child: Padding(
-                      padding: EdgeInsets.all(16.0),
-                      child: Center(
-                        child: Text(
-                          "لا توجد حركات مسجلة في الفترة المحددة",
-                          style: TextStyle(fontSize: 12, color: AppColors.neutral500),
-                        ),
-                      ),
-                    ),
-                  )
-                else
-                  Card(
-                    child: ListView.separated(
-                      shrinkWrap: true,
-                      physics: const NeverScrollableScrollPhysics(),
-                      itemCount: _filteredTransactions.length,
-                      separatorBuilder: (_, __) => const Divider(height: 1),
-                      itemBuilder: (context, index) {
-                        final tx = _filteredTransactions[index];
-                        final code = _currencies[tx.currencyId]?.code ?? "";
-                        return ListTile(
-                          dense: true,
-                          leading: Checkbox(
-                            value: _selectedTransactionIds.contains(tx.id),
-                            onChanged: (value) => _toggleTransactionSelection(
-                              tx.id,
-                              value ?? false,
-                            ),
-                          ),
-                          title: Text(
-                            tx.beneficiary ?? tx.type,
-                            style: const TextStyle(fontWeight: FontWeight.bold),
-                          ),
-                          subtitle: Text(
-                            "النوع: ${tx.type} • وقت القيد: ${DateFormat('MM-dd HH:mm').format(tx.createdAt.toLocal())}",
-                          ),
-                          trailing: Text(
-                            "${tx.amount} $code",
-                            style: const TextStyle(
-                              fontWeight: FontWeight.bold,
-                              color: AppColors.primary,
-                            ),
-                          ),
-                          onTap: () => _toggleTransactionSelection(
-                            tx.id,
-                            !_selectedTransactionIds.contains(tx.id),
-                          ),
-                        );
-                      },
-                    ),
-                  ),
-
-                const SizedBox(height: 20),
-
-                // SECTION: New edits
-                Row(
-                  children: [
-                    const Icon(
-                      Icons.history_toggle_off_rounded,
-                      color: AppColors.brandGold,
-                      size: 22,
-                    ),
-                    const SizedBox(width: 8),
-                    Text(
-                      "عمليات تعديل الحركات في الفترة المحددة (${_filteredEdits.length})",
-                      style: const TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 14,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                if (_filteredEdits.isEmpty)
-                  const Card(
-                    child: Padding(
-                      padding: EdgeInsets.all(16.0),
-                      child: Center(
-                        child: Text(
-                          "لا توجد عمليات تعديل مسجلة في الفترة المحددة",
-                          style: TextStyle(fontSize: 12, color: AppColors.neutral500),
-                        ),
-                      ),
-                    ),
-                  )
-                else
-                  Card(
-                    child: ListView.separated(
-                      shrinkWrap: true,
-                      physics: const NeverScrollableScrollPhysics(),
-                      itemCount: _filteredEdits.length,
-                      separatorBuilder: (_, __) => const Divider(height: 1),
-                      itemBuilder: (context, index) {
-                        final edit = _filteredEdits[index];
-                        final tx = _allTxMap[edit['txId']];
-                        final beneficiary = tx?.beneficiary ?? "الحركة مجهولة";
-                        return ListTile(
-                          dense: true,
-                          leading: const Icon(
-                            Icons.edit_note_rounded,
-                            color: AppColors.ocean,
-                          ),
-                          title: Text(
-                            "تعديل حقل (${edit['field']}) لحركة للمستفيد [$beneficiary]",
-                            style: const TextStyle(
-                              fontWeight: FontWeight.bold,
-                              fontSize: 12,
-                            ),
-                          ),
-                          subtitle: Text(
-                            "مبلغ الحركة تعدل من: ${edit['oldValue']} ← ليصبح: ${edit['newValue']}\nالمدقق المسؤول: ${edit['editedBy']} في ${DateFormat('MM-dd HH:mm').format(edit['editedAt'].toLocal())}",
-                            style: const TextStyle(fontSize: 11),
-                          ),
-                        );
-                      },
-                    ),
-                  ),
-
-                const SizedBox(height: 28),
-
-                // Button: Confirm and Seal balances
-                FutureBuilder<Map<String, double>>(
-                  future: _calculateCurrentBalances(),
-                  builder: (context, snapshot) {
-                    return SizedBox(
-                      width: double.infinity,
-                      child: FilledButton.icon(
-                        style: FilledButton.styleFrom(
-                          backgroundColor: AppColors.brandGold,
-                          foregroundColor: AppColors.brandGreenDark,
-                          padding: const EdgeInsets.symmetric(vertical: 14),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(AppDims.radiusSm),
-                          ),
-                        ),
-                        onPressed: _confirmMatching,
-                        icon: const Icon(Icons.fact_check_rounded),
-                        label: const Text(
-                          "الأرصدة والصندوق مطابق لحد الآن",
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            fontSize: 15,
-                          ),
-                        ),
-                      ),
                     );
                   },
                 ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 
-                const SizedBox(height: 32),
+  List<Transaction> _filteredTx() {
+    return _transactions.where((t) {
+      if (_onlyUnmarked && _txState.containsKey(t.id)) return false;
+      if (_search.trim().isEmpty) return true;
+      final q = _search.trim().toLowerCase();
+      return (t.beneficiary ?? '').toLowerCase().contains(q) ||
+          t.type.toLowerCase().contains(q) ||
+          t.amount.toString().contains(q);
+    }).toList();
+  }
+}
 
-                // SECTION: Reconciliation History
-                const Row(
+// ================= شريط الملخص =================
+
+class _SummaryBar extends StatelessWidget {
+  final String fileName;
+  final _FileKind kind;
+  final int total;
+  final int matched;
+  final int notMatched;
+  final VoidCallback? onOpen;
+  final bool loading;
+
+  const _SummaryBar({
+    required this.fileName,
+    required this.kind,
+    required this.total,
+    required this.matched,
+    required this.notMatched,
+    required this.onOpen,
+    required this.loading,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final unmarked = total - matched - notMatched;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        AppDims.pagePadding,
+        12,
+        AppDims.pagePadding,
+        8,
+      ),
+      child: TimaContentWidth(
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          decoration: BoxDecoration(
+            color: AppUi.surface(context),
+            borderRadius: BorderRadius.circular(AppDims.radiusLg),
+            border: Border.all(color: AppUi.border(context)),
+            boxShadow: AppUi.softShadow(context),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  gradient: const LinearGradient(
+                    begin: AlignmentDirectional.topStart,
+                    end: AlignmentDirectional.bottomEnd,
+                    colors: AppColors.brandGradient,
+                  ),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: const Icon(
+                  Icons.fact_check_rounded,
+                  color: Colors.white,
+                  size: 20,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Icon(
-                      Icons.history_edu_rounded,
-                      color: AppColors.brandGold,
-                      size: 22,
-                    ),
-                    SizedBox(width: 8),
                     Text(
-                      "سجل ومحاضر المطابقات السابقة المعتمدة",
+                      fileName.isEmpty ? 'لم يُفتح ملف بعد' : fileName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                       style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 14,
+                        fontWeight: FontWeight.w800,
+                        fontSize: 13.5,
+                        color: AppUi.textPrimary(context),
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      'زر أيسر = مطابق • زر أيمن = غير مطابق • العلامات داخل التطبيق فقط ولا تُحفظ بالملف',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: AppUi.textSecondary(context),
                       ),
                     ),
                   ],
                 ),
-                const SizedBox(height: 8),
-                if (_matchHistory.isEmpty)
-                  const Card(
-                    child: Padding(
-                      padding: EdgeInsets.all(16.0),
-                      child: Center(
-                        child: Text(
-                          "لا توجد مطبابقات سابقة مسجلة بالدفاتر",
-                          style: TextStyle(fontSize: 12, color: AppColors.neutral500),
-                        ),
-                      ),
-                    ),
-                  )
-                else
-                  ..._matchHistory.map((match) {
-                    final mapBals = Map<String, dynamic>.from(
-                      match['balances'] ?? {},
-                    );
-                    return Card(
-                      margin: const EdgeInsets.symmetric(vertical: 6),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(AppDims.radiusLg),
-                      ),
-                      child: Padding(
-                        padding: const EdgeInsets.all(12.0),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                Row(
-                                  children: [
-                                    const Icon(
-                                      Icons.bookmark_added_rounded,
-                                      color: AppColors.success,
-                                      size: 18,
-                                    ),
-                                    const SizedBox(width: 6),
-                                    Text(
-                                      "محضر مطابقة: ${_formatDateStr(match['dateTime'])}",
-                                      style: const TextStyle(
-                                        fontWeight: FontWeight.bold,
-                                        fontSize: 12,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                                Container(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 8,
-                                    vertical: 2,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    color: AppColors.success.withValues(alpha: 0.12),
-                                    borderRadius: BorderRadius.circular(6),
-                                  ),
-                                  child: Text(
-                                    "المطابِق: [ ${match['matchedBy']} ]", // إظهار المستخدم بوضوح
-                                    style: const TextStyle(
-                                      color: AppColors.success,
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 10,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                            const Divider(height: 16),
-                            const Text(
-                              "الأرصدة المغلقة والمعتمدة بالمحضر:",
-                              style: TextStyle(
-                                fontSize: 11,
-                                color: AppColors.neutral500,
-                              ),
-                            ),
-                            const SizedBox(height: 4),
-                            Wrap(
-                              spacing: 6,
-                              runSpacing: 4,
-                              children: mapBals.entries.map((e) {
-                                return Chip(
-                                  visualDensity: VisualDensity.compact,
-                                  backgroundColor: AppColors.neutral500.withValues(alpha: 
-                                    0.06,
-                                  ),
-                                  label: Text(
-                                    "${e.key}: ${e.value.toStringAsFixed(2)}",
-                                    style: const TextStyle(
-                                      fontSize: 10,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                );
-                              }).toList(),
-                            ),
-                            const SizedBox(height: 8),
-                            Align(
-                              alignment: Alignment.centerLeft,
-                              child: TextButton.icon(
-                                onPressed: () => Navigator.push(
-                                  context,
-                                  MaterialPageRoute(
-                                    builder: (_) =>
-                                        ReconciliationDetailPage(match: match),
-                                  ),
-                                ),
-                                icon: const Icon(Icons.open_in_new_rounded),
-                                label: const Text('فتح المحضر في صفحة مستقلة'),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    );
-                  }),
-              ],
-            ),
+              ),
+              const SizedBox(width: 8),
+              _Pill(
+                label: 'مطابق $matched',
+                color: AppUi.tone(context, AppColors.success),
+                icon: Icons.check_circle_rounded,
+              ),
+              const SizedBox(width: 6),
+              _Pill(
+                label: 'غير مطابق $notMatched',
+                color: AppUi.tone(context, AppColors.error),
+                icon: Icons.cancel_rounded,
+              ),
+              const SizedBox(width: 6),
+              _Pill(
+                label: 'بدون $unmarked',
+                color: AppUi.textSecondary(context),
+                icon: Icons.help_outline_rounded,
+              ),
+              const SizedBox(width: 10),
+              FilledButton.icon(
+                onPressed: onOpen,
+                style: FilledButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 10,
+                  ),
+                ),
+                icon: loading
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.folder_open_rounded, size: 18),
+                label: Text(kind == _FileKind.none ? 'فتح ملف' : 'تغيير الملف'),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
 }
 
-class ReconciliationDetailPage extends StatelessWidget {
-  final Map<String, dynamic> match;
-
-  const ReconciliationDetailPage({super.key, required this.match});
+class _Pill extends StatelessWidget {
+  final String label;
+  final Color color;
+  final IconData icon;
+  const _Pill({required this.label, required this.color, required this.icon});
 
   @override
   Widget build(BuildContext context) {
-    final balances = Map<String, dynamic>.from(match['balances'] ?? {});
-    final selected =
-        (match['selectedTransactionIds'] as List? ?? const []).length;
-    return Scaffold(
-      backgroundColor: Colors.transparent,
-      appBar: timaMaybeAppBar(context, title: 'محضر المطابقة'),
-      body: TimaPageBackground(
-        child: ListView(
-        padding: const EdgeInsets.all(20),
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(18),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'تاريخ المطابقة: ${DateFormat('yyyy-MM-dd HH:mm').format(DateTime.parse(match['dateTime']).toLocal())}',
-                    style: const TextStyle(fontWeight: FontWeight.w800),
-                  ),
-                  const SizedBox(height: 8),
-                  Text('تمت بواسطة: ${match['matchedBy'] ?? 'غير معروف'}'),
-                  if (selected > 0) ...[
-                    const SizedBox(height: 8),
-                    Text('الحركات المحددة في المحضر: $selected'),
-                  ],
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(height: 16),
-          const Text(
-            'الأرصدة المعتمدة',
-            style: TextStyle(fontWeight: FontWeight.w900, fontSize: 16),
-          ),
-          const SizedBox(height: 8),
-          ...balances.entries.map(
-            (entry) => Card(
-              child: ListTile(
-                leading: CircleAvatar(child: Text(entry.key)),
-                title: Text(entry.key),
-                trailing: Text(
-                  (entry.value as num).toStringAsFixed(2),
-                  style: const TextStyle(fontWeight: FontWeight.w900),
-                ),
-              ),
+          Icon(icon, size: 14, color: color),
+          const SizedBox(width: 5),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w800,
+              color: color,
             ),
           ),
         ],
       ),
+    );
+  }
+}
+
+// ================= مقبض التقسيم =================
+
+class _SplitHandle extends StatelessWidget {
+  final double total;
+  final ValueChanged<double> onDrag;
+  const _SplitHandle({required this.total, required this.onDrag});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onHorizontalDragUpdate: (d) => onDrag(d.delta.dx),
+      child: MouseRegion(
+        cursor: SystemMouseCursors.resizeColumn,
+        child: SizedBox(
+          width: 10,
+          child: Center(
+            child: Container(
+              width: 4,
+              height: 46,
+              decoration: BoxDecoration(
+                color: AppUi.border(context),
+                borderRadius: BorderRadius.circular(4),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ================= لوحة الملف =================
+
+class _FilePanel extends StatelessWidget {
+  final _FileKind kind;
+  final String fileName;
+  final String? error;
+  final List<Uint8List> pdfPages;
+  final List<Size> pdfSizes;
+  final Map<int, List<_PdfMark>> pdfMarks;
+  final List<List<String>> excelRows;
+  final Map<int, MatchState> excelMarks;
+  final VoidCallback? onOpen;
+  final void Function(int, MatchState) onMarkRow;
+  final void Function(int, double, double, bool) onAddPdfMark;
+  final void Function(int) onClearPageMarks;
+
+  const _FilePanel({
+    required this.kind,
+    required this.fileName,
+    required this.error,
+    required this.pdfPages,
+    required this.pdfSizes,
+    required this.pdfMarks,
+    required this.excelRows,
+    required this.excelMarks,
+    required this.onOpen,
+    required this.onMarkRow,
+    required this.onAddPdfMark,
+    required this.onClearPageMarks,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: AppUi.surface(context),
+        borderRadius: BorderRadius.circular(AppDims.radiusLg),
+        border: Border.all(color: AppUi.border(context)),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        children: [
+          _panelHeader(context),
+          Expanded(child: _body(context)),
+        ],
+      ),
+    );
+  }
+
+  Widget _panelHeader(BuildContext context) {
+    final title = switch (kind) {
+      _FileKind.pdf => 'مستند PDF — ${pdfPages.length} صفحة',
+      _FileKind.excel => 'جدول Excel — ${excelRows.length} صف',
+      _FileKind.none => 'الملف المرجعي',
+    };
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: AppUi.border(context))),
+        color: AppUi.sunken(context),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            kind == _FileKind.excel
+                ? Icons.table_view_rounded
+                : Icons.picture_as_pdf_rounded,
+            size: 18,
+            color: AppUi.accent(context),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontWeight: FontWeight.w800,
+                fontSize: 13,
+                color: AppUi.textPrimary(context),
+              ),
+            ),
+          ),
+          if (kind == _FileKind.pdf)
+            Text(
+              'انقر على الصفحة لوضع علامة',
+              style: TextStyle(fontSize: 11, color: AppUi.textSecondary(context)),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _body(BuildContext context) {
+    if (kind == _FileKind.pdf && pdfPages.isNotEmpty) {
+      return ListView.separated(
+        padding: const EdgeInsets.all(12),
+        itemCount: pdfPages.length,
+        separatorBuilder: (_, __) => const SizedBox(height: 12),
+        itemBuilder: (context, i) => _PdfPage(
+          index: i,
+          png: pdfPages[i],
+          size: pdfSizes[i],
+          marks: pdfMarks[i] ?? const [],
+          onAddMark: onAddPdfMark,
+          onClear: onClearPageMarks,
+        ),
+      );
+    }
+    if (kind == _FileKind.excel && excelRows.isNotEmpty) {
+      return ListView.builder(
+        padding: const EdgeInsets.all(8),
+        itemCount: excelRows.length,
+        itemBuilder: (context, i) => _ExcelRow(
+          index: i,
+          cells: excelRows[i],
+          state: excelMarks[i] ?? MatchState.none,
+          onMark: onMarkRow,
+        ),
+      );
+    }
+    return _EmptyFile(onOpen: onOpen, error: error);
+  }
+}
+
+class _EmptyFile extends StatelessWidget {
+  final VoidCallback? onOpen;
+  final String? error;
+  const _EmptyFile({required this.onOpen, required this.error});
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 78,
+              height: 78,
+              decoration: BoxDecoration(
+                color: AppUi.tone(context, AppColors.brandGold).withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(24),
+              ),
+              child: Icon(
+                Icons.upload_file_rounded,
+                size: 36,
+                color: AppUi.tone(context, AppColors.brandGoldDark),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              'افتح ملف PDF أو Excel',
+              style: TextStyle(
+                fontWeight: FontWeight.w800,
+                fontSize: 15,
+                color: AppUi.textPrimary(context),
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'اعرض كشف الحساب أو الجدول بجانب الحركات، وضع علامات داخل التطبيق دون أي تعديل على الملف الأصلي.',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 12,
+                height: 1.6,
+                color: AppUi.textSecondary(context),
+              ),
+            ),
+            if (error != null) ...[
+              const SizedBox(height: 10),
+              Text(
+                error!,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 11,
+                  color: AppUi.tone(context, AppColors.error),
+                ),
+              ),
+            ],
+            const SizedBox(height: 18),
+            FilledButton.icon(
+              onPressed: onOpen,
+              icon: const Icon(Icons.folder_open_rounded),
+              label: const Text('اختيار ملف'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _PdfPage extends StatelessWidget {
+  final int index;
+  final Uint8List png;
+  final Size size;
+  final List<_PdfMark> marks;
+  final void Function(int, double, double, bool) onAddMark;
+  final void Function(int) onClear;
+
+  const _PdfPage({
+    required this.index,
+    required this.png,
+    required this.size,
+    required this.marks,
+    required this.onAddMark,
+    required this.onClear,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final w = constraints.maxWidth;
+        final h = size.width == 0 ? w : w * size.height / size.width;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Text(
+                  'صفحة ${index + 1}',
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    color: AppUi.textSecondary(context),
+                  ),
+                ),
+                const Spacer(),
+                if (marks.isNotEmpty)
+                  InkWell(
+                    onTap: () => onClear(index),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 6,
+                        vertical: 2,
+                      ),
+                      child: Text(
+                        'مسح علامات الصفحة (${marks.length})',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: AppUi.tone(context, AppColors.error),
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            SizedBox(
+              width: w,
+              height: h,
+              child: Stack(
+                children: [
+                  Positioned.fill(
+                    child: Image.memory(png, fit: BoxFit.fill),
+                  ),
+                  for (final m in marks)
+                    Positioned(
+                      left: m.dx * w - 13,
+                      top: m.dy * h - 13,
+                      child: _MarkDot(matched: m.matched),
+                    ),
+                  Positioned.fill(
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTapDown: (d) => onAddMark(
+                        index,
+                        d.localPosition.dx / w,
+                        d.localPosition.dy / h,
+                        true,
+                      ),
+                      onSecondaryTapDown: (d) => onAddMark(
+                        index,
+                        d.localPosition.dx / w,
+                        d.localPosition.dy / h,
+                        false,
+                      ),
+                      child: const SizedBox.expand(),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _MarkDot extends StatelessWidget {
+  final bool matched;
+  const _MarkDot({required this.matched});
+
+  @override
+  Widget build(BuildContext context) {
+    final color = matched ? const Color(0xFF1E9E6A) : const Color(0xFFD6453D);
+    return Container(
+      width: 26,
+      height: 26,
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.92),
+        shape: BoxShape.circle,
+        border: Border.all(color: Colors.white, width: 2),
+        boxShadow: const [
+          BoxShadow(color: Color(0x55000000), blurRadius: 4, offset: Offset(0, 2)),
+        ],
+      ),
+      child: Icon(
+        matched ? Icons.check_rounded : Icons.close_rounded,
+        size: 16,
+        color: Colors.white,
+      ),
+    );
+  }
+}
+
+class _ExcelRow extends StatelessWidget {
+  final int index;
+  final List<String> cells;
+  final MatchState state;
+  final void Function(int, MatchState) onMark;
+
+  const _ExcelRow({
+    required this.index,
+    required this.cells,
+    required this.state,
+    required this.onMark,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final bg = switch (state) {
+      MatchState.matched => AppUi.tone(context, AppColors.success).withValues(alpha: 0.12),
+      MatchState.notMatched => AppUi.tone(context, AppColors.error).withValues(alpha: 0.12),
+      MatchState.none => Colors.transparent,
+    };
+    final accent = switch (state) {
+      MatchState.matched => AppUi.tone(context, AppColors.success),
+      MatchState.notMatched => AppUi.tone(context, AppColors.error),
+      MatchState.none => AppUi.border(context),
+    };
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => onMark(index, MatchState.matched),
+      onSecondaryTap: () => onMark(index, MatchState.notMatched),
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: Container(
+          margin: const EdgeInsets.only(bottom: 4),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          decoration: BoxDecoration(
+            color: bg,
+            borderRadius: BorderRadius.circular(AppDims.radiusSm),
+            border: Border.all(color: accent.withValues(alpha: 0.35)),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 22,
+                height: 22,
+                decoration: BoxDecoration(
+                  color: accent.withValues(alpha: 0.15),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(
+                  state == MatchState.matched
+                      ? Icons.check_rounded
+                      : state == MatchState.notMatched
+                          ? Icons.close_rounded
+                          : Icons.circle_outlined,
+                  size: 14,
+                  color: accent,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  reverse: true,
+                  child: Row(
+                    children: [
+                      for (var i = 0; i < cells.length; i++)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                          child: Text(
+                            cells[i],
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: i == 0
+                                  ? FontWeight.w700
+                                  : FontWeight.w500,
+                              color: AppUi.textPrimary(context),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ================= لوحة الحركات =================
+
+class _TxPanel extends StatelessWidget {
+  final bool loading;
+  final List<Transaction> transactions;
+  final Map<int, MatchState> states;
+  final Map<int, Currency> currencies;
+  final String search;
+  final bool onlyUnmarked;
+  final ValueChanged<String> onSearch;
+  final ValueChanged<bool> onToggleUnmarked;
+  final void Function(int, MatchState) onMark;
+  final String Function(double) fmt;
+
+  const _TxPanel({
+    required this.loading,
+    required this.transactions,
+    required this.states,
+    required this.currencies,
+    required this.search,
+    required this.onlyUnmarked,
+    required this.onSearch,
+    required this.onToggleUnmarked,
+    required this.onMark,
+    required this.fmt,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: AppUi.surface(context),
+        borderRadius: BorderRadius.circular(AppDims.radiusLg),
+        border: Border.all(color: AppUi.border(context)),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        children: [
+          Container(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+            decoration: BoxDecoration(
+              border: Border(bottom: BorderSide(color: AppUi.border(context))),
+              color: AppUi.sunken(context),
+            ),
+            child: Column(
+              children: [
+                Row(
+                  children: [
+                    Icon(
+                      Icons.swap_horiz_rounded,
+                      size: 18,
+                      color: AppUi.accent(context),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      'الحركات (${transactions.length})',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w800,
+                        fontSize: 13,
+                        color: AppUi.textPrimary(context),
+                      ),
+                    ),
+                    const Spacer(),
+                    _MiniToggle(
+                      label: 'بدون علامة فقط',
+                      value: onlyUnmarked,
+                      onChanged: onToggleUnmarked,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  onChanged: onSearch,
+                  style: const TextStyle(fontSize: 13),
+                  decoration: InputDecoration(
+                    isDense: true,
+                    hintText: 'ابحث بالاسم أو النوع أو المبلغ…',
+                    prefixIcon: const Icon(Icons.search_rounded, size: 18),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(AppDims.radiusSm),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: loading
+                ? const TimaLoader(message: 'جارٍ تحميل الحركات…')
+                : transactions.isEmpty
+                    ? TimaEmptyState(
+                        icon: Icons.inbox_rounded,
+                        title: 'لا توجد حركات',
+                        subtitle: 'غيّر البحث أو الحدّد «بدون علامة فقط».',
+                      )
+                    : ListView.builder(
+                        padding: const EdgeInsets.all(8),
+                        itemCount: transactions.length,
+                        itemBuilder: (context, i) {
+                          final tx = transactions[i];
+                          return _TxRow(
+                            tx: tx,
+                            code: currencies[tx.currencyId]?.code ?? '',
+                            state: states[tx.id] ?? MatchState.none,
+                            onMark: onMark,
+                            fmt: fmt,
+                          );
+                        },
+                      ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MiniToggle extends StatelessWidget {
+  final String label;
+  final bool value;
+  final ValueChanged<bool> onChanged;
+  const _MiniToggle({
+    required this.label,
+    required this.value,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: () => onChanged(!value),
+      borderRadius: BorderRadius.circular(20),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        decoration: BoxDecoration(
+          color: value
+              ? AppUi.tone(context, AppColors.brandGold).withValues(alpha: 0.16)
+              : Colors.transparent,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: value
+                ? AppUi.tone(context, AppColors.brandGold)
+                : AppUi.border(context),
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              value ? Icons.filter_alt_rounded : Icons.filter_alt_outlined,
+              size: 14,
+              color: value
+                  ? AppUi.tone(context, AppColors.brandGoldDark)
+                  : AppUi.textSecondary(context),
+            ),
+            const SizedBox(width: 5),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                color: value
+                    ? AppUi.tone(context, AppColors.brandGoldDark)
+                    : AppUi.textSecondary(context),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _TxRow extends StatelessWidget {
+  final Transaction tx;
+  final String code;
+  final MatchState state;
+  final void Function(int, MatchState) onMark;
+  final String Function(double) fmt;
+
+  const _TxRow({
+    required this.tx,
+    required this.code,
+    required this.state,
+    required this.onMark,
+    required this.fmt,
+  });
+
+  ({IconData icon, Color color, String label}) _visual() {
+    final t = tx.type;
+    if (t.contains('يوزر')) {
+      return (icon: Icons.person_rounded, color: AppColors.violet, label: 'يوزر');
+    }
+    if (t.contains('تسليم')) {
+      return (icon: Icons.outbox_rounded, color: AppColors.warning, label: 'تسليم');
+    }
+    if (t.contains('استلام')) {
+      return (
+        icon: Icons.move_to_inbox_rounded,
+        color: AppColors.success,
+        label: 'استلام',
+      );
+    }
+    if (t.contains('مرسلة')) {
+      return (icon: Icons.send_rounded, color: AppColors.info, label: 'مرسلة');
+    }
+    if (t.contains('تسوية') || t.contains('صرف')) {
+      return (
+        icon: Icons.currency_exchange_rounded,
+        color: AppColors.teal,
+        label: 'تسوية',
+      );
+    }
+    return (
+      icon: Icons.receipt_long_rounded,
+      color: AppColors.slate,
+      label: 'حركة',
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final v = _visual();
+    final accent = switch (state) {
+      MatchState.matched => AppUi.tone(context, AppColors.success),
+      MatchState.notMatched => AppUi.tone(context, AppColors.error),
+      MatchState.none => AppUi.tone(context, v.color),
+    };
+    final bg = switch (state) {
+      MatchState.matched => AppUi.tone(context, AppColors.success).withValues(alpha: 0.10),
+      MatchState.notMatched => AppUi.tone(context, AppColors.error).withValues(alpha: 0.10),
+      MatchState.none => Colors.transparent,
+    };
+
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => onMark(tx.id, MatchState.matched),
+      onSecondaryTap: () => onMark(tx.id, MatchState.notMatched),
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 130),
+          margin: const EdgeInsets.only(bottom: 6),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+          decoration: BoxDecoration(
+            color: bg,
+            borderRadius: BorderRadius.circular(AppDims.radiusSm),
+            border: Border.all(color: accent.withValues(alpha: 0.3)),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 34,
+                height: 34,
+                decoration: BoxDecoration(
+                  color: accent.withValues(alpha: 0.14),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Icon(v.icon, size: 17, color: accent),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      tx.beneficiary?.trim().isNotEmpty == true
+                          ? tx.beneficiary!.trim()
+                          : v.label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontWeight: FontWeight.w800,
+                        fontSize: 13,
+                        color: AppUi.textPrimary(context),
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      '${v.label} • ${DateFormat('MM-dd HH:mm').format(tx.createdAt.toLocal())} • ${tx.status}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: AppUi.textSecondary(context),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                '${fmt(tx.amount)} $code',
+                style: TextStyle(
+                  fontWeight: FontWeight.w900,
+                  fontSize: 13,
+                  color: accent,
+                ),
+              ),
+              const SizedBox(width: 6),
+              Icon(
+                state == MatchState.matched
+                    ? Icons.check_circle_rounded
+                    : state == MatchState.notMatched
+                        ? Icons.cancel_rounded
+                        : Icons.radio_button_unchecked_rounded,
+                size: 18,
+                color: accent,
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
