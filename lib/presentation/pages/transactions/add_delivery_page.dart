@@ -396,7 +396,7 @@ class _AddDeliveryPageState extends State<AddDeliveryPage> {
         oldNote: prevTx?.note,
         isUserType: isUserType,
         currency1: currency1,
-        counts1: userCounts1!,
+        counts1: userCounts1,
         currency2: userCurrency2,
         counts2: userCounts2,
       );

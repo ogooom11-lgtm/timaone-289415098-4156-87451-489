@@ -561,7 +561,7 @@ class _RecordsPageState extends State<RecordsPage> {
       case _TxKind.receive:
         note = '$base[الفئات المستلمة لـ ${currency1.code}: ${fmt(counts1)}]';
         if (has2) {
-          note += '\n[الفئات المستلمة لـ ${currency2!.code}: ${fmt(counts2!)}]';
+          note += '\n[الفئات المستلمة لـ ${currency2.code}: ${fmt(counts2)}]';
         }
       case _TxKind.sent:
         note =
@@ -569,18 +569,18 @@ class _RecordsPageState extends State<RecordsPage> {
       case _TxKind.user:
         note = '$base[الفئات المسلمة لـ ${currency1.code}: ${fmt(counts1)}]';
         if (has2) {
-          note += '\n[الفئات المسلمة لـ ${currency2!.code}: ${fmt(counts2!)}]';
+          note += '\n[الفئات المسلمة لـ ${currency2.code}: ${fmt(counts2)}]';
         }
       case _TxKind.delivery:
         final nowStr = DateFormat('yyyy-MM-dd HH:mm').format(DateTime.now());
         note = '$base[تم التسليم في $nowStr]\n[فئات المسلم: ${fmt(counts1)}]';
         if (has2) {
-          note += '\n[فئات المسلم 2: ${fmt(counts2!)} (${currency2!.code})]';
+          note += '\n[فئات المسلم 2: ${fmt(counts2)} (${currency2.code})]';
         }
       case _TxKind.exchange:
         note = '$base[فئات المسلم لـ ${currency1.code}: ${fmt(counts1)}]';
         if (has2) {
-          note += '\n[فئات المستلم لـ ${currency2!.code}: ${fmt(counts2!)}]';
+          note += '\n[فئات المستلم لـ ${currency2.code}: ${fmt(counts2)}]';
         }
     }
     return note;

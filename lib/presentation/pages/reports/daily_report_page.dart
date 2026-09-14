@@ -1080,8 +1080,8 @@ class _TxCardState extends State<_TxCard> {
         false,
       ));
     }
-    if (tx.rate != null && tx.rate! > 0) {
-      facts.add(('السعر', '${widget.fmt(tx.rate!)}', Icons.show_chart_rounded, false));
+    if (tx.exchangeRate != null && tx.exchangeRate! > 0) {
+      facts.add(('السعر', widget.fmt(tx.exchangeRate!), Icons.show_chart_rounded, false));
     }
     facts.add(('الحالة', tx.status, Icons.flag_rounded, false));
     facts.add((
@@ -1094,12 +1094,6 @@ class _TxCardState extends State<_TxCard> {
       'سجّلها',
       tx.createdByName.isEmpty ? '—' : tx.createdByName,
       Icons.person_rounded,
-      false,
-    ));
-    facts.add((
-      'المكتب',
-      tx.officeName.isEmpty ? '—' : tx.officeName,
-      Icons.storefront_rounded,
       false,
     ));
 
