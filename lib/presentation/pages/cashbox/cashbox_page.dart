@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -126,15 +128,20 @@ class _CashboxPageState extends State<CashboxPage>
       final path = await FilePicker.saveFile(
         dialogTitle: 'حفظ صورة الأرصدة',
         fileName: 'tima_balances_$stamp.png',
-        type: FileType.image,
+        type: FileType.custom,
         allowedExtensions: const ['png'],
-        bytes: bytes,
       );
       if (path != null && path.isNotEmpty) {
+        // نكتب البايتات مباشرة عبر dart:io (أوثق على ويندوز من تمريرها
+        // للحزمة). نضمن امتداد png حتى لو حذفه المستخدم.
+        var outPath = path;
+        if (!outPath.toLowerCase().endsWith('.png')) outPath = '$outPath.png';
+        await File(outPath).writeAsBytes(bytes, flush: true);
         AppSound.play(TimaSound.success);
         _toast(messenger, 'تم حفظ صورة الأرصدة', okColor);
       }
-    } catch (e) {
+    } catch (e, st) {
+      debugPrint('balances image error: $e\n$st');
       AppSound.play(TimaSound.error);
       _toast(messenger, 'تعذّر إنشاء الصورة: $e', errColor);
     } finally {

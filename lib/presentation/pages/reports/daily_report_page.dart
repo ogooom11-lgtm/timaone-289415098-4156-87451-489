@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:intl/intl.dart';
+import 'package:intl/intl.dart' hide TextDirection;
 
 import '../../../core/storage/app_database.dart';
 import '../../../core/theme/app_colors.dart';
@@ -8,7 +8,8 @@ import '../../../core/theme/app_theme.dart';
 import '../../../core/utils/currency_denoms.dart';
 import '../../widgets/app_ui.dart';
 
-/// صفحة تفاصيل اليوم — إحصائيات كاملة بالعدد والمبالغ حسب العملة.
+/// صفحة تفاصيل اليوم — تصميم عصري: مؤشرات رئيسية أنيقة، تفصيل حسب العملة،
+/// وبطاقات حركات قابلة للتوسّع لعرض تفصيل كل حركة.
 class DailyReportPage extends StatefulWidget {
   final AppDatabase db;
 
@@ -42,8 +43,10 @@ class _DailyReportPageState extends State<DailyReportPage> {
     });
   }
 
+  // ---------- منطق البيانات (مثبت ومجرَّب) ----------
+
   String _formatArabicDate(DateTime date) {
-    final ymd = DateFormat('yyyy-MM-dd').format(date);
+    final ymd = DateFormat('yyyy/MM/dd').format(date);
     final weekdayEng = DateFormat('EEEE').format(date);
     const weekdaysAr = {
       'Monday': 'الاثنين',
@@ -55,6 +58,14 @@ class _DailyReportPageState extends State<DailyReportPage> {
       'Sunday': 'الأحد',
     };
     return '$ymd (${weekdaysAr[weekdayEng] ?? weekdayEng})';
+  }
+
+  bool _isToday(DateTime d) {
+    final now = DateTime.now();
+    final local = d.toLocal();
+    return local.year == now.year &&
+        local.month == now.month &&
+        local.day == now.day;
   }
 
   bool _isSameDay(DateTime d) {
@@ -91,7 +102,6 @@ class _DailyReportPageState extends State<DailyReportPage> {
   List<Transaction> get _dayTransactions =>
       _transactions.where((t) => _isSameDay(t.createdAt)).toList();
 
-  /// كل المعلقة الحالية (ليست فقط اليوم)
   List<Transaction> get _pendingAll => _transactions.where((t) {
         return _isDelivery(t.type) &&
             t.status == 'مضافة' &&
@@ -151,7 +161,6 @@ class _DailyReportPageState extends State<DailyReportPage> {
           }
         }
       } else if (_isUser(type)) {
-        // يوزر = تسليم مكتمل فوراً
         totals.deliveryCount++;
         totals.deliveredDoneCount++;
         addAmount(totals.deliveryByCurrency, t.currencyId, t.amount);
@@ -180,9 +189,7 @@ class _DailyReportPageState extends State<DailyReportPage> {
         }
       } else if (_isSent(type)) {
         totals.sentCount++;
-        // المستلم من العميل
         addAmount(totals.sentInByCurrency, t.currencyId, t.amount);
-        // المرسل
         if (t.targetAmount != null && t.targetCurrencyId != null) {
           addAmount(totals.sentOutByCurrency, t.targetCurrencyId, t.targetAmount);
         }
@@ -202,7 +209,6 @@ class _DailyReportPageState extends State<DailyReportPage> {
       }
     }
 
-    // معلقة (كل الأوقات)
     for (final t in _pendingAll) {
       totals.pendingCount++;
       addAmount(totals.pendingByCurrency, t.currencyId, t.amount);
@@ -214,9 +220,8 @@ class _DailyReportPageState extends State<DailyReportPage> {
     return totals;
   }
 
-  void _changeDay(int days) {
-    setState(() => _date = _date.add(Duration(days: days)));
-  }
+  void _changeDay(int days) =>
+      setState(() => _date = _date.add(Duration(days: days)));
 
   Future<void> _pickDate() async {
     final picked = await showDatePicker(
@@ -228,15 +233,35 @@ class _DailyReportPageState extends State<DailyReportPage> {
     if (picked != null) setState(() => _date = picked);
   }
 
+  // ---------- تنسيق ----------
+
   String _fmt(double v) {
-    if (v == v.roundToDouble()) return v.toStringAsFixed(0);
-    return v.toStringAsFixed(2);
+    final abs = v.abs();
+    final text = abs == abs.roundToDouble()
+        ? abs.toStringAsFixed(0)
+        : abs.toStringAsFixed(2);
+    final parts = text.split('.');
+    final buf = StringBuffer();
+    for (var i = 0; i < parts[0].length; i++) {
+      if (i > 0 && (parts[0].length - i) % 3 == 0) buf.write(',');
+      buf.write(parts[0][i]);
+    }
+    final out = parts.length > 1 ? '${buf.toString()}.${parts[1]}' : buf.toString();
+    return v < 0 ? '−$out' : out;
   }
 
   String _amountsText(Map<String, double> map) {
     if (map.isEmpty) return '—';
-    final keys = map.keys.toList()..sort();
-    return keys.map((c) => '${_fmt(map[c]!)} $c').join('  •  ');
+    return (map.keys.toList()..sort())
+        .map((c) => '${_fmt(map[c]!)} $c')
+        .join('  •  ');
+  }
+
+  String _inOut(Map<String, double> a, Map<String, double> b, String la, String lb) {
+    final parts = <String>[];
+    if (a.isNotEmpty) parts.add('$la: ${_amountsText(a)}');
+    if (b.isNotEmpty) parts.add('$lb: ${_amountsText(b)}');
+    return parts.isEmpty ? '—' : parts.join('\n');
   }
 
   Future<void> _copyReport(_DayTotals totals) async {
@@ -265,9 +290,14 @@ class _DailyReportPageState extends State<DailyReportPage> {
     await Clipboard.setData(ClipboardData(text: buffer.toString()));
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('تم نسخ تقرير اليوم')),
+      const SnackBar(
+        content: Text('تم نسخ تقرير اليوم'),
+        behavior: SnackBarBehavior.floating,
+      ),
     );
   }
+
+  // ---------- الواجهة ----------
 
   @override
   Widget build(BuildContext context) {
@@ -281,14 +311,14 @@ class _DailyReportPageState extends State<DailyReportPage> {
         title: 'تفاصيل اليوم',
         actions: [
           IconButton(
-            tooltip: 'تحديث',
-            onPressed: _load,
-            icon: const Icon(Icons.refresh),
-          ),
-          IconButton(
             tooltip: 'نسخ التقرير',
             onPressed: () => _copyReport(totals),
-            icon: const Icon(Icons.copy_all),
+            icon: const Icon(Icons.copy_all_rounded),
+          ),
+          IconButton(
+            tooltip: 'تحديث',
+            onPressed: _load,
+            icon: const Icon(Icons.refresh_rounded),
           ),
         ],
       ),
@@ -299,261 +329,92 @@ class _DailyReportPageState extends State<DailyReportPage> {
                 onRefresh: _load,
                 child: Scrollbar(
                   child: ListView(
-                  padding: const EdgeInsets.fromLTRB(
-                    AppDims.pagePadding,
-                    14,
-                    AppDims.pagePadding,
-                    28,
-                  ),
-                  children: [
-                    TimaContentWidth(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                    // شريط اختيار اليوم
-                    TimaPanel(
-                      padding: const EdgeInsets.all(10),
-                      child: Row(
-                        children: [
-                          IconButton(
-                            tooltip: 'اليوم السابق',
-                            onPressed: () => _changeDay(-1),
-                            icon: const Icon(Icons.chevron_right_rounded),
-                          ),
-                          Expanded(
-                            child: InkWell(
-                              onTap: _pickDate,
-                              borderRadius:
-                                  BorderRadius.circular(AppDims.radiusSm),
-                              child: Padding(
-                                padding:
-                                    const EdgeInsets.symmetric(vertical: 8),
+                    padding: const EdgeInsets.fromLTRB(
+                      AppDims.pagePadding,
+                      14,
+                      AppDims.pagePadding,
+                      28,
+                    ),
+                    children: [
+                      TimaContentWidth(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            _DateNav(
+                              label: _formatArabicDate(_date),
+                              isToday: _isToday(_date),
+                              count: dayTxs.length,
+                              onPrev: () => _changeDay(-1),
+                              onNext: () => _changeDay(1),
+                              onPick: _pickDate,
+                            ),
+                            const SizedBox(height: 16),
+
+                            // المؤشرات الرئيسية.
+                            const TimaSectionTitle(
+                              icon: Icons.insights_rounded,
+                              title: 'مؤشرات اليوم',
+                              subtitle: 'العدد ومجموع المبالغ حسب العملة',
+                            ),
+                            const SizedBox(height: 10),
+                            _buildKpis(totals),
+
+                            // تفصيل حسب العملة.
+                            const SizedBox(height: 22),
+                            const TimaSectionTitle(
+                              icon: Icons.account_balance_wallet_rounded,
+                              title: 'تفصيل المبالغ حسب العملة',
+                              subtitle: 'ملخّص لكل عملة ظهرت اليوم',
+                            ),
+                            const SizedBox(height: 10),
+                            ..._currencyBreakdown(totals),
+
+                            // حركات اليوم (قابلة للتوسّع).
+                            const SizedBox(height: 22),
+                            TimaSectionTitle(
+                              icon: Icons.receipt_long_rounded,
+                              title: 'حركات اليوم',
+                              subtitle: dayTxs.isEmpty
+                                  ? 'لا توجد حركات'
+                                  : '${dayTxs.length} حركة — اضغط لعرض التفصيل',
+                            ),
+                            const SizedBox(height: 10),
+                            if (dayTxs.isEmpty)
+                              const TimaPanel(
                                 child: Row(
-                                  mainAxisAlignment: MainAxisAlignment.center,
                                   children: [
                                     Icon(
-                                      Icons.calendar_month_rounded,
-                                      color: AppUi.accent(context),
-                                      size: 17,
+                                      Icons.event_busy_rounded,
+                                      color: AppColors.neutral400,
                                     ),
-                                    const SizedBox(width: 9),
+                                    SizedBox(width: 10),
                                     Text(
-                                      _formatArabicDate(_date),
-                                      textAlign: TextAlign.center,
-                                      style: TextStyle(
-                                        color: AppUi.textPrimary(context),
-                                        fontWeight: FontWeight.w800,
-                                        fontSize: 14.5,
-                                      ),
+                                      'لا توجد حركات مسجّلة في هذا اليوم.',
+                                      style:
+                                          TextStyle(color: AppColors.neutral500),
                                     ),
                                   ],
                                 ),
-                              ),
-                            ),
-                          ),
-                          IconButton(
-                            tooltip: 'اليوم التالي',
-                            onPressed: () => _changeDay(1),
-                            icon: const Icon(Icons.chevron_left_rounded),
-                          ),
-                        ],
-                      ),
-                    ),
-
-                    const SizedBox(height: 16),
-                    const TimaSectionTitle(
-                      icon: Icons.today,
-                      title: 'ملخص حركات اليوم',
-                      subtitle: 'العدد + مجموع المبالغ حسب العملة',
-                    ),
-                    const SizedBox(height: 10),
-
-                    _SummaryCard(
-                      icon: Icons.add_circle_outline,
-                      color: AppColors.brandGreen,
-                      title: 'إجمالي الحركات المضافة',
-                      count: totals.addedCount,
-                      amounts: totals.addedByCurrency,
-                      fmt: _fmt,
-                    ),
-                    const SizedBox(height: 8),
-                    GridView.count(
-                      crossAxisCount: 2,
-                      shrinkWrap: true,
-                      physics: const NeverScrollableScrollPhysics(),
-                      mainAxisSpacing: 8,
-                      crossAxisSpacing: 8,
-                      childAspectRatio: 1.05,
-                      children: [
-                        _TypeCard(
-                          title: 'تسليم',
-                          icon: Icons.outbox,
-                          color: AppColors.warning,
-                          count: totals.deliveryCount,
-                          amounts: totals.deliveryByCurrency,
-                          fmt: _fmt,
-                        ),
-                        _TypeCard(
-                          title: 'استلام',
-                          icon: Icons.move_to_inbox,
-                          color: AppColors.success,
-                          count: totals.receiveCount,
-                          amounts: totals.receiveByCurrency,
-                          fmt: _fmt,
-                        ),
-                        _TypeCard(
-                          title: 'مرسلة',
-                          icon: Icons.send,
-                          color: AppColors.info,
-                          count: totals.sentCount,
-                          amounts: totals.sentInByCurrency,
-                          secondaryLabel: 'صادر',
-                          secondaryAmounts: totals.sentOutByCurrency,
-                          fmt: _fmt,
-                        ),
-                        _TypeCard(
-                          title: 'صرف',
-                          icon: Icons.currency_exchange,
-                          color: AppColors.violet,
-                          count: totals.exchangeCount,
-                          amounts: totals.exchangeOutByCurrency,
-                          secondaryLabel: 'داخل',
-                          secondaryAmounts: totals.exchangeInByCurrency,
-                          fmt: _fmt,
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: _TypeCard(
-                            title: 'تم تسليمها',
-                            icon: Icons.check_circle_outline,
-                            color: AppColors.success,
-                            count: totals.deliveredDoneCount,
-                            amounts: totals.deliveredDoneByCurrency,
-                            fmt: _fmt,
-                            tall: false,
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: _TypeCard(
-                            title: 'إلغاء',
-                            icon: Icons.cancel_outlined,
-                            color: AppColors.error,
-                            count: totals.cancelledCount,
-                            amounts: totals.cancelledByCurrency,
-                            fmt: _fmt,
-                            tall: false,
-                          ),
-                        ),
-                      ],
-                    ),
-
-                    const SizedBox(height: 20),
-                    TimaSectionTitle(
-                      icon: Icons.hourglass_empty,
-                      title: 'الحركات المعلقة حالياً',
-                      subtitle: totals.pendingCount == 0
-                          ? 'لا توجد معلقة'
-                          : '${totals.pendingCount} حركة بانتظار التسليم',
-                    ),
-                    const SizedBox(height: 10),
-                    _SummaryCard(
-                      icon: Icons.hourglass_empty,
-                      color: AppColors.brandGoldDark,
-                      title: 'مجموع المعلقة حسب العملة',
-                      count: totals.pendingCount,
-                      amounts: totals.pendingByCurrency,
-                      fmt: _fmt,
-                    ),
-                    if (totals.pendingByCurrency.isNotEmpty) ...[
-                      const SizedBox(height: 8),
-                      TimaPanel(
-                        child: Column(
-                          children: totals.pendingByCurrency.entries.map((e) {
-                            return Padding(
-                              padding: const EdgeInsets.symmetric(vertical: 6),
-                              child: Row(
-                                children: [
-                                  Container(
-                                    width: 42,
-                                    height: 32,
-                                    alignment: Alignment.center,
-                                    decoration: BoxDecoration(
-                                      color: AppColors.brandGold.withValues(alpha: 
-                                        0.15,
-                                      ),
-                                      borderRadius: BorderRadius.circular(AppDims.radiusSm),
-                                    ),
-                                    child: Text(
-                                      e.key,
-                                      style: const TextStyle(
-                                        fontWeight: FontWeight.w900,
-                                        fontSize: 12,
-                                        color: AppColors.brandGoldDark,
+                              )
+                            else
+                              ...dayTxs.asMap().entries.map(
+                                    (e) => _Staggered(
+                                      index: e.key,
+                                      child: _TxCard(
+                                        tx: e.value,
+                                        code: _codeOf(e.value.currencyId),
+                                        targetCode:
+                                            _codeOf(e.value.targetCurrencyId),
+                                        feesCode: _codeOf(e.value.feesCurrencyId),
+                                        canceled: _isCancelled(e.value),
+                                        fmt: _fmt,
                                       ),
                                     ),
                                   ),
-                                  const SizedBox(width: 12),
-                                  const Expanded(
-                                    child: Text(
-                                      'مبالغ معلقة',
-                                      style: TextStyle(
-                                        fontWeight: FontWeight.w700,
-                                      ),
-                                    ),
-                                  ),
-                                  Text(
-                                    _fmt(e.value),
-                                    style: const TextStyle(
-                                      fontWeight: FontWeight.w900,
-                                      color: AppColors.warning,
-                                      fontSize: 15,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            );
-                          }).toList(),
+                          ],
                         ),
                       ),
                     ],
-
-                    // تفصيل المبالغ لكل عملة في اليوم
-                    const SizedBox(height: 20),
-                    const TimaSectionTitle(
-                      icon: Icons.account_balance_wallet,
-                      title: 'تفصيل المبالغ حسب العملة',
-                      subtitle: 'ملخص سريع لكل عملة ظهرت اليوم',
-                    ),
-                    const SizedBox(height: 10),
-                    ..._currencyBreakdownCards(totals),
-
-                    const SizedBox(height: 20),
-                    TimaSectionTitle(
-                      icon: Icons.receipt_long,
-                      title: 'سجل حركات اليوم',
-                      subtitle: dayTxs.isEmpty
-                          ? 'لا توجد حركات'
-                          : '${dayTxs.length} حركة',
-                    ),
-                    const SizedBox(height: 10),
-                    if (dayTxs.isEmpty)
-                      const TimaPanel(
-                        child: Text(
-                          'لا توجد حركات مسجّلة في هذا اليوم.',
-                          style: TextStyle(color: AppColors.neutral500),
-                        ),
-                      )
-                    else
-                      ...dayTxs.map(_txTile),
-                        ],
-                      ),
-                    ),
-                  ],
                   ),
                 ),
               ),
@@ -561,7 +422,53 @@ class _DailyReportPageState extends State<DailyReportPage> {
     );
   }
 
-  List<Widget> _currencyBreakdownCards(_DayTotals totals) {
+  Widget _buildKpis(_DayTotals t) {
+    final kpis = <_Kpi>[
+      _Kpi(Icons.add_circle_outline, AppColors.brandGreen, 'إجمالي المضافة',
+          t.addedCount, _amountsText(t.addedByCurrency)),
+      _Kpi(Icons.outbox_rounded, AppColors.warning, 'تسليم',
+          t.deliveryCount, _amountsText(t.deliveryByCurrency)),
+      _Kpi(Icons.move_to_inbox_rounded, AppColors.success, 'استلام',
+          t.receiveCount, _amountsText(t.receiveByCurrency)),
+      _Kpi(Icons.send_rounded, AppColors.info, 'مرسلة', t.sentCount,
+          _inOut(t.sentInByCurrency, t.sentOutByCurrency, 'وارد', 'صادر')),
+      _Kpi(Icons.currency_exchange_rounded, AppColors.violet, 'صرف',
+          t.exchangeCount,
+          _inOut(t.exchangeOutByCurrency, t.exchangeInByCurrency, 'خارج', 'داخل')),
+      _Kpi(Icons.check_circle_outline_rounded, AppColors.success, 'تم التسليم',
+          t.deliveredDoneCount, _amountsText(t.deliveredDoneByCurrency)),
+      _Kpi(Icons.cancel_outlined, AppColors.error, 'إلغاء',
+          t.cancelledCount, _amountsText(t.cancelledByCurrency)),
+      _Kpi(Icons.hourglass_empty_rounded, AppColors.brandGoldDark, 'معلقة',
+          t.pendingCount, _amountsText(t.pendingByCurrency)),
+    ];
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final w = constraints.maxWidth;
+        final cols = w >= 1100
+            ? 4
+            : w >= 780
+                ? 3
+                : w >= 460
+                    ? 2
+                    : 1;
+        return GridView(
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: cols,
+            mainAxisSpacing: 10,
+            crossAxisSpacing: 10,
+            mainAxisExtent: 128,
+          ),
+          children: kpis.map((k) => _StatTile(kpi: k)).toList(),
+        );
+      },
+    );
+  }
+
+  List<Widget> _currencyBreakdown(_DayTotals totals) {
     final codes = <String>{
       ...totals.addedByCurrency.keys,
       ...totals.deliveryByCurrency.keys,
@@ -577,8 +484,8 @@ class _DailyReportPageState extends State<DailyReportPage> {
       ..sort();
 
     if (codes.isEmpty) {
-      return [
-        const TimaPanel(
+      return const [
+        TimaPanel(
           child: Text(
             'لا توجد مبالغ لهذا اليوم.',
             style: TextStyle(color: AppColors.neutral500),
@@ -587,139 +494,49 @@ class _DailyReportPageState extends State<DailyReportPage> {
       ];
     }
 
-    return codes.map((code) {
-      return Container(
-        margin: const EdgeInsets.only(bottom: 8),
-        padding: const EdgeInsets.all(14),
-        decoration: AppUi.panelDecoration(context),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 10,
-                    vertical: 6,
-                  ),
-                  decoration: BoxDecoration(
-                    color: AppColors.brandGreen.withValues(alpha: 0.1),
-                    borderRadius: BorderRadius.circular(AppDims.radiusSm),
-                  ),
-                  child: Text(
-                    code,
-                    style: const TextStyle(
-                      fontWeight: FontWeight.w900,
-                      color: AppColors.brandGreen,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Builder(
-                  builder: (_) {
-                    final match = _currencies.values.where((c) => c.code == code);
-                    final label = match.isEmpty
-                        ? code
-                        : CurrencyDenoms.displayName(match.first);
-                    return Text(
-                      label,
-                      style: const TextStyle(fontWeight: FontWeight.w800),
-                    );
-                  },
-                ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            _line('تسليم', totals.deliveryByCurrency[code]),
-            _line('استلام', totals.receiveByCurrency[code]),
-            _line('مرسلة وارد', totals.sentInByCurrency[code]),
-            _line('مرسلة صادر', totals.sentOutByCurrency[code]),
-            _line('صرف خارج', totals.exchangeOutByCurrency[code]),
-            _line('صرف داخل', totals.exchangeInByCurrency[code]),
-            _line('تم تسليمها', totals.deliveredDoneByCurrency[code]),
-            _line('إلغاء', totals.cancelledByCurrency[code]),
-            _line('معلقة', totals.pendingByCurrency[code]),
-          ],
-        ),
-      );
-    }).toList();
-  }
-
-  Widget _line(String label, double? value) {
-    if (value == null || value.abs() < 0.0001) {
-      return const SizedBox.shrink();
-    }
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 3),
-      child: Row(
-        children: [
-          Expanded(
-            child: Text(
-              label,
-              style: TextStyle(
-                fontSize: 12,
-                color: AppColors.neutral600,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
+    return codes
+        .map(
+          (code) => _CurrencyCard(
+            code: code,
+            name: (() {
+              final match =
+                  _currencies.values.where((c) => c.code == code);
+              return match.isEmpty ? code : CurrencyDenoms.displayName(match.first);
+            })(),
+            rows: [
+              _BLine('تسليم', totals.deliveryByCurrency[code], AppColors.warning),
+              _BLine('استلام', totals.receiveByCurrency[code], AppColors.success),
+              _BLine('مرسلة وارد', totals.sentInByCurrency[code], AppColors.info),
+              _BLine('مرسلة صادر', totals.sentOutByCurrency[code], AppColors.info),
+              _BLine('صرف خارج', totals.exchangeOutByCurrency[code], AppColors.violet),
+              _BLine('صرف داخل', totals.exchangeInByCurrency[code], AppColors.violet),
+              _BLine('تم تسليمها', totals.deliveredDoneByCurrency[code], AppColors.success),
+              _BLine('إلغاء', totals.cancelledByCurrency[code], AppColors.error),
+              _BLine('معلقة', totals.pendingByCurrency[code], AppColors.warning),
+            ].where((r) => r.value != null && r.value!.abs() > 0.0001).toList(),
+            fmt: _fmt,
           ),
-          Text(
-            _fmt(value),
-            style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 13),
-          ),
-        ],
-      ),
-    );
+        )
+        .toList();
   }
+}
 
-  Widget _txTile(Transaction tx) {
-    final canceled = _isCancelled(tx);
-    Color color = AppColors.slate;
-    IconData icon = Icons.receipt_long;
-    if (_isDelivery(tx.type) || _isUser(tx.type)) {
-      color = AppColors.warning;
-      icon = Icons.outbox;
-    } else if (_isReceive(tx.type)) {
-      color = AppColors.success;
-      icon = Icons.move_to_inbox;
-    } else if (_isSent(tx.type)) {
-      color = AppColors.info;
-      icon = Icons.send;
-    } else if (_isExchange(tx.type)) {
-      color = AppColors.violet;
-      icon = Icons.currency_exchange;
-    }
-    if (canceled) {
-      color = AppColors.error;
-      icon = Icons.cancel;
-    }
+// ---------- نماذج مساعدة ----------
 
-    return Container(
-      margin: const EdgeInsets.only(bottom: 8),
-      decoration: AppUi.panelDecoration(context),
-      child: ListTile(
-        leading: CircleAvatar(
-          backgroundColor: color.withValues(alpha: 0.12),
-          child: Icon(icon, color: color, size: 18),
-        ),
-        title: Text(
-          tx.beneficiary ?? tx.type,
-          style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 13),
-        ),
-        subtitle: Text(
-          '${tx.type} • ${DateFormat('HH:mm').format(tx.createdAt.toLocal())} • ${tx.status}',
-          style: const TextStyle(fontSize: 11),
-        ),
-        trailing: Text(
-          '${_fmt(tx.amount)} ${_codeOf(tx.currencyId)}',
-          style: TextStyle(
-            fontWeight: FontWeight.w900,
-            color: canceled ? AppColors.error : null,
-          ),
-        ),
-      ),
-    );
-  }
+class _Kpi {
+  final IconData icon;
+  final Color color;
+  final String label;
+  final int count;
+  final String amounts;
+  const _Kpi(this.icon, this.color, this.label, this.count, this.amounts);
+}
+
+class _BLine {
+  final String label;
+  final double? value;
+  final Color color;
+  const _BLine(this.label, this.value, this.color);
 }
 
 class _DayTotals {
@@ -751,77 +568,108 @@ class _DayTotals {
   final Map<String, double> pendingByCurrency = {};
 }
 
-class _SummaryCard extends StatelessWidget {
-  final IconData icon;
-  final Color color;
-  final String title;
-  final int count;
-  final Map<String, double> amounts;
-  final String Function(double) fmt;
+// ---------- شريط التاريخ ----------
 
-  const _SummaryCard({
-    required this.icon,
-    required this.color,
-    required this.title,
+class _DateNav extends StatelessWidget {
+  final String label;
+  final bool isToday;
+  final int count;
+  final VoidCallback onPrev;
+  final VoidCallback onNext;
+  final VoidCallback onPick;
+
+  const _DateNav({
+    required this.label,
+    required this.isToday,
     required this.count,
-    required this.amounts,
-    required this.fmt,
+    required this.onPrev,
+    required this.onNext,
+    required this.onPick,
   });
 
   @override
   Widget build(BuildContext context) {
-    final amountText = amounts.isEmpty
-        ? '—'
-        : (amounts.keys.toList()..sort())
-            .map((c) => '${fmt(amounts[c]!)} $c')
-            .join('  •  ');
-
+    final accent = AppUi.accent(context);
     return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: AppUi.panelDecoration(context),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+      decoration: BoxDecoration(
+        color: AppUi.surface(context),
+        borderRadius: BorderRadius.circular(AppDims.radiusLg),
+        border: Border.all(color: AppUi.border(context)),
+        boxShadow: AppUi.softShadow(context),
+      ),
       child: Row(
         children: [
-          Container(
-            width: 46,
-            height: 46,
-            decoration: BoxDecoration(
-              color: color.withValues(alpha: 0.12),
-              borderRadius: BorderRadius.circular(AppDims.radius),
-            ),
-            child: Icon(icon, color: color),
+          IconButton(
+            tooltip: 'اليوم السابق',
+            onPressed: onPrev,
+            icon: const Icon(Icons.chevron_right_rounded),
           ),
-          const SizedBox(width: 12),
           Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style: const TextStyle(
-                    fontWeight: FontWeight.w800,
-                    fontSize: 13,
-                  ),
+            child: InkWell(
+              onTap: onPick,
+              borderRadius: BorderRadius.circular(AppDims.radiusSm),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 6),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.calendar_month_rounded, color: accent, size: 18),
+                    const SizedBox(width: 9),
+                    Text(
+                      label,
+                      style: TextStyle(
+                        color: AppUi.textPrimary(context),
+                        fontWeight: FontWeight.w800,
+                        fontSize: 15,
+                      ),
+                    ),
+                    if (isToday) ...[
+                      const SizedBox(width: 9),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 2,
+                        ),
+                        decoration: BoxDecoration(
+                          color: AppUi.tone(context, AppColors.success)
+                              .withValues(alpha: 0.14),
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        child: Text(
+                          'اليوم',
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w800,
+                            color: AppUi.tone(context, AppColors.success),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
                 ),
-                const SizedBox(height: 4),
-                Text(
-                  '$count حركة',
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: AppColors.neutral500,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  amountText,
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w800,
-                    color: color,
-                  ),
-                ),
-              ],
+              ),
             ),
+          ),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            decoration: BoxDecoration(
+              color: AppUi.sunken(context),
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: Text(
+              '$count حركة',
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w800,
+                color: AppUi.textSecondary(context),
+              ),
+            ),
+          ),
+          IconButton(
+            tooltip: 'اليوم التالي',
+            onPressed: onNext,
+            icon: const Icon(Icons.chevron_left_rounded),
           ),
         ],
       ),
@@ -829,40 +677,17 @@ class _SummaryCard extends StatelessWidget {
   }
 }
 
-class _TypeCard extends StatelessWidget {
-  final String title;
-  final IconData icon;
-  final Color color;
-  final int count;
-  final Map<String, double> amounts;
-  final Map<String, double>? secondaryAmounts;
-  final String? secondaryLabel;
-  final String Function(double) fmt;
-  final bool tall;
+// ---------- بطاقة مؤشر ----------
 
-  const _TypeCard({
-    required this.title,
-    required this.icon,
-    required this.color,
-    required this.count,
-    required this.amounts,
-    required this.fmt,
-    this.secondaryAmounts,
-    this.secondaryLabel,
-    this.tall = true,
-  });
-
-  String _mapText(Map<String, double> map) {
-    if (map.isEmpty) return '—';
-    return (map.keys.toList()..sort())
-        .map((c) => '${fmt(map[c]!)} $c')
-        .join('\n');
-  }
+class _StatTile extends StatelessWidget {
+  final _Kpi kpi;
+  const _StatTile({required this.kpi});
 
   @override
   Widget build(BuildContext context) {
+    final color = AppUi.tone(context, kpi.color);
     return Container(
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: AppUi.surface(context),
         borderRadius: BorderRadius.circular(AppDims.radiusLg),
@@ -874,70 +699,513 @@ class _TypeCard extends StatelessWidget {
           Row(
             children: [
               Container(
-                width: 30,
-                height: 30,
+                width: 34,
+                height: 34,
                 decoration: BoxDecoration(
                   color: color.withValues(alpha: 0.12),
                   borderRadius: BorderRadius.circular(AppDims.radiusSm),
                 ),
-                child: Icon(icon, size: 16, color: color),
+                child: Icon(kpi.icon, size: 18, color: color),
               ),
-              const SizedBox(width: 8),
+              const SizedBox(width: 9),
               Expanded(
                 child: Text(
-                  title,
+                  kpi.label,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontWeight: FontWeight.w800,
-                    fontSize: 12,
+                    fontSize: 12.5,
+                    color: AppUi.textPrimary(context),
                   ),
                 ),
               ),
             ],
           ),
-          const SizedBox(height: 10),
+          const Spacer(),
           Text(
-            '$count',
+            '${kpi.count}',
             style: TextStyle(
-              fontSize: 24,
+              fontSize: 26,
               fontWeight: FontWeight.w900,
               color: color,
               height: 1,
             ),
           ),
-          const SizedBox(height: 6),
+          const SizedBox(height: 5),
           Text(
-            _mapText(amounts),
+            kpi.amounts,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
             style: TextStyle(
               fontSize: 11,
               fontWeight: FontWeight.w700,
-              color: AppColors.neutral600,
-              height: 1.25,
+              color: AppUi.textSecondary(context),
+              height: 1.3,
             ),
           ),
-          if (secondaryAmounts != null && secondaryAmounts!.isNotEmpty) ...[
-            const SizedBox(height: 4),
-            Text(
-              '${secondaryLabel ?? 'إضافي'}:',
-              style: TextStyle(
-                fontSize: 10,
-                fontWeight: FontWeight.w700,
-                color: AppColors.neutral500,
+        ],
+      ),
+    );
+  }
+}
+
+// ---------- بطاقة تفصيل عملة ----------
+
+class _CurrencyCard extends StatelessWidget {
+  final String code;
+  final String name;
+  final List<_BLine> rows;
+  final String Function(double) fmt;
+
+  const _CurrencyCard({
+    required this.code,
+    required this.name,
+    required this.rows,
+    required this.fmt,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(14),
+      decoration: AppUi.panelDecoration(context),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                  gradient: const LinearGradient(
+                    begin: AlignmentDirectional.topStart,
+                    end: AlignmentDirectional.bottomEnd,
+                    colors: AppColors.brandGradient,
+                  ),
+                  borderRadius: BorderRadius.circular(AppDims.radiusSm),
+                ),
+                child: Text(
+                  code,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w900,
+                    fontSize: 12,
+                  ),
+                ),
               ),
-            ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontWeight: FontWeight.w800,
+                    fontSize: 13.5,
+                    color: AppUi.textPrimary(context),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          if (rows.isEmpty)
             Text(
-              _mapText(secondaryAmounts!),
-              style: TextStyle(
-                fontSize: 11,
-                fontWeight: FontWeight.w700,
-                color: AppColors.neutral600,
-                height: 1.25,
+              'لا مبالغ مفصّلة',
+              style: TextStyle(fontSize: 12, color: AppUi.textSecondary(context)),
+            )
+          else
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: rows
+                  .map(
+                    (r) => Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 6,
+                      ),
+                      decoration: BoxDecoration(
+                        color: AppUi.tone(context, r.color)
+                            .withValues(alpha: 0.08),
+                        borderRadius: BorderRadius.circular(AppDims.radiusSm),
+                        border: Border.all(
+                          color: AppUi.tone(context, r.color)
+                              .withValues(alpha: 0.2),
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            r.label,
+                            style: TextStyle(
+                              fontSize: 11.5,
+                              fontWeight: FontWeight.w700,
+                              color: AppUi.textSecondary(context),
+                            ),
+                          ),
+                          const SizedBox(width: 7),
+                          Text(
+                            fmt(r.value!),
+                            style: TextStyle(
+                              fontSize: 12.5,
+                              fontWeight: FontWeight.w900,
+                              color: AppUi.tone(context, r.color),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  )
+                  .toList(),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+// ---------- بطاقة حركة قابلة للتوسّع ----------
+
+class _TxCard extends StatefulWidget {
+  final Transaction tx;
+  final String code;
+  final String targetCode;
+  final String feesCode;
+  final bool canceled;
+  final String Function(double) fmt;
+
+  const _TxCard({
+    required this.tx,
+    required this.code,
+    required this.targetCode,
+    required this.feesCode,
+    required this.canceled,
+    required this.fmt,
+  });
+
+  @override
+  State<_TxCard> createState() => _TxCardState();
+}
+
+class _TxCardState extends State<_TxCard> {
+  bool _expanded = false;
+  bool _hover = false;
+
+  ({Color color, IconData icon, String label}) get _visual {
+    if (widget.canceled) {
+      return (
+        color: AppColors.error,
+        icon: Icons.cancel_rounded,
+        label: 'ملغية',
+      );
+    }
+    final type = widget.tx.type;
+    if (type.contains('يوزر')) {
+      return (color: AppColors.violet, icon: Icons.person_rounded, label: 'يوزر');
+    }
+    if (type.contains('تسليم')) {
+      return (color: AppColors.warning, icon: Icons.outbox_rounded, label: 'تسليم');
+    }
+    if (type.contains('استلام')) {
+      return (
+        color: AppColors.success,
+        icon: Icons.move_to_inbox_rounded,
+        label: 'استلام',
+      );
+    }
+    if (type.contains('مرسلة')) {
+      return (color: AppColors.info, icon: Icons.send_rounded, label: 'مرسلة');
+    }
+    if (type.contains('تسوية') || type.contains('صرف')) {
+      return (
+        color: AppColors.teal,
+        icon: Icons.currency_exchange_rounded,
+        label: 'تسوية',
+      );
+    }
+    return (
+      color: AppColors.slate,
+      icon: Icons.receipt_long_rounded,
+      label: 'حركة',
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final v = _visual;
+    final accent = AppUi.tone(context, v.color);
+    final dt = widget.tx.createdAt.toLocal();
+    final amount =
+        '${widget.fmt(widget.tx.amount)} ${widget.code}';
+
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        onTap: () => setState(() => _expanded = !_expanded),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          curve: Curves.easeOut,
+          margin: const EdgeInsets.only(bottom: 10),
+          decoration: BoxDecoration(
+            color: AppUi.surface(context),
+            borderRadius: BorderRadius.circular(AppDims.radius),
+            border: Border.all(
+              color: _hover
+                  ? accent.withValues(alpha: 0.45)
+                  : AppUi.border(context),
+            ),
+            boxShadow: _hover ? AppUi.raisedShadow(context) : AppUi.softShadow(context),
+          ),
+          child: Column(
+            children: [
+              // الرأس.
+              Padding(
+                padding: const EdgeInsets.fromLTRB(13, 12, 11, 12),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 4,
+                      height: 36,
+                      decoration: BoxDecoration(
+                        color: accent,
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Container(
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        color: accent.withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Icon(v.icon, color: accent, size: 19),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            widget.tx.beneficiary?.trim().isNotEmpty == true
+                                ? widget.tx.beneficiary!.trim()
+                                : v.label,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontWeight: FontWeight.w800,
+                              fontSize: 14,
+                              color: AppUi.textPrimary(context),
+                            ),
+                          ),
+                          const SizedBox(height: 3),
+                          Text(
+                            '${v.label} • ${DateFormat('HH:mm').format(dt)} • ${widget.tx.status}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 11.5,
+                              color: AppUi.textSecondary(context),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Text(
+                      amount,
+                      style: TextStyle(
+                        fontWeight: FontWeight.w900,
+                        fontSize: 15,
+                        color: widget.canceled
+                            ? AppUi.tone(context, AppColors.error)
+                            : accent,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    AnimatedRotation(
+                      turns: _expanded ? 0.5 : 0,
+                      duration: const Duration(milliseconds: 180),
+                      child: Icon(
+                        Icons.keyboard_arrow_down_rounded,
+                        color: AppUi.textSecondary(context),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+              // التفاصيل.
+              AnimatedSize(
+                duration: const Duration(milliseconds: 180),
+                curve: Curves.easeOut,
+                alignment: AlignmentDirectional.topCenter,
+                child: _expanded ? _details(context) : const SizedBox(width: double.infinity),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _details(BuildContext context) {
+    final tx = widget.tx;
+    final facts = <(String, String, IconData?, bool)>[
+      ('التاريخ', DateFormat('yyyy/MM/dd  HH:mm').format(tx.createdAt.toLocal()),
+          Icons.schedule_rounded, false),
+      ('النوع', tx.type, Icons.category_rounded, false),
+      ('المبلغ', '${widget.fmt(tx.amount)} ${widget.code}',
+          Icons.payments_rounded, true),
+    ];
+    if (tx.targetAmount != null && tx.targetAmount! != 0) {
+      facts.add((
+        'المبلغ الثاني',
+        '${widget.fmt(tx.targetAmount!)} ${widget.targetCode}',
+        Icons.swap_horiz_rounded,
+        true,
+      ));
+    }
+    if (tx.fees != null && tx.fees! != 0) {
+      facts.add((
+        'الأجور',
+        '${widget.fmt(tx.fees!)} ${widget.feesCode}',
+        Icons.account_balance_wallet_rounded,
+        false,
+      ));
+    }
+    if (tx.rate != null && tx.rate! > 0) {
+      facts.add(('السعر', '${widget.fmt(tx.rate!)}', Icons.show_chart_rounded, false));
+    }
+    facts.add(('الحالة', tx.status, Icons.flag_rounded, false));
+    facts.add((
+      'وضع الحركة',
+      tx.movementState,
+      widget.canceled ? Icons.cancel_rounded : Icons.verified_rounded,
+      false,
+    ));
+    facts.add((
+      'سجّلها',
+      tx.createdByName.isEmpty ? '—' : tx.createdByName,
+      Icons.person_rounded,
+      false,
+    ));
+    facts.add((
+      'المكتب',
+      tx.officeName.isEmpty ? '—' : tx.officeName,
+      Icons.storefront_rounded,
+      false,
+    ));
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(13, 0, 13, 13),
+      decoration: BoxDecoration(
+        border: Border(top: BorderSide(color: AppUi.border(context))),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            children: facts
+                .map(
+                  (f) => SizedBox(
+                    width: 240,
+                    child: TimaKeyValue(
+                      label: f.$1,
+                      value: f.$2,
+                      icon: f.$3,
+                      emphasized: f.$4,
+                    ),
+                  ),
+                )
+                .toList(),
+          ),
+          if (tx.note?.trim().isNotEmpty == true) ...[
+            const SizedBox(height: 12),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                color: AppUi.sunken(context),
+                borderRadius: BorderRadius.circular(AppDims.radiusSm),
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(Icons.sticky_note_2_outlined,
+                      size: 15, color: AppUi.textSecondary(context)),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      tx.note!.trim(),
+                      style: TextStyle(
+                        fontSize: 12,
+                        height: 1.5,
+                        color: AppUi.textSecondary(context),
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
           ],
         ],
       ),
+    );
+  }
+}
+
+// ---------- ظهور متدرّج ----------
+
+class _Staggered extends StatefulWidget {
+  final Widget child;
+  final int index;
+  const _Staggered({required this.child, this.index = 0});
+
+  @override
+  State<_Staggered> createState() => _StaggeredState();
+}
+
+class _StaggeredState extends State<_Staggered>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _c = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 320),
+  );
+  late final Animation<double> _fade =
+      CurvedAnimation(parent: _c, curve: Curves.easeOut);
+  late final Animation<Offset> _slide = Tween<Offset>(
+    begin: const Offset(0, 0.06),
+    end: Offset.zero,
+  ).animate(CurvedAnimation(parent: _c, curve: Curves.easeOutCubic));
+
+  @override
+  void initState() {
+    super.initState();
+    Future.delayed(Duration(milliseconds: 40 * widget.index.clamp(0, 12)), _c.forward);
+  }
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FadeTransition(
+      opacity: _fade,
+      child: SlideTransition(position: _slide, child: widget.child),
     );
   }
 }

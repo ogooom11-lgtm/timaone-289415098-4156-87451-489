@@ -164,7 +164,12 @@ Future<Uint8List> renderBalancesImage({
   final pic = rec.endRecording();
   final img = await pic.toImage(w.toInt(), h.toInt());
   final data = await img.toByteData(format: ui.ImageByteFormat.png);
-  return data!.buffer.asUint8List();
+  img.dispose();
+  pic.dispose();
+  if (data == null) {
+    throw StateError('لم يُنشأ بيانات الصورة (toByteData أعاد null)');
+  }
+  return data.buffer.asUint8List();
 }
 
 /// ملخّص نصّي للأرصدة (للنسخ إلى الحافظة).
