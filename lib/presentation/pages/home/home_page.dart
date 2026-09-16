@@ -778,7 +778,8 @@ class DashboardPage extends StatefulWidget {
   State<DashboardPage> createState() => _DashboardPageState();
 }
 
-class _DashboardPageState extends State<DashboardPage> with TxActions {
+class _DashboardPageState extends State<DashboardPage>
+    with TxActions<DashboardPage> {
   /// مفاتيح التنبيهات التي سبق أن رنّ لها الصوت، حتى لا يتكرّر
   /// الرنين مع كل إعادة بناء أو تحديث للوحة.
   final Set<String> _announced = {};

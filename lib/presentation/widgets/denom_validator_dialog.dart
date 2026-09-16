@@ -182,6 +182,7 @@ class _DenomValidatorDialogState extends State<DenomValidatorDialog> {
     setState(() {});
   }
 
+  // ignore: unused_element
   void _autoFill() {
     final filled = CurrencyDenoms.autoFill(
       widget.targetAmount,
@@ -195,6 +196,7 @@ class _DenomValidatorDialogState extends State<DenomValidatorDialog> {
     setState(() {});
   }
 
+  // ignore: unused_element
   void _clearAll() {
     for (final c in _controllers.values) {
       c.clear();

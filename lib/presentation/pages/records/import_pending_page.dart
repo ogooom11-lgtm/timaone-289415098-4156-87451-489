@@ -46,6 +46,7 @@ class _PendingDraft {
     this.amount2,
     this.currencyCode2,
     this.note = '',
+    // ignore: unused_element_parameter
     this.selected = true,
   });
 }

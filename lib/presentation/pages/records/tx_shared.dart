@@ -6,6 +6,7 @@ import '../../../core/printing/delivery_receipt.dart';
 import '../../../core/services/app_sound.dart';
 import '../../../core/storage/app_database.dart';
 import '../../../core/theme/app_colors.dart';
+import '../../../core/theme/app_theme.dart';
 import '../../../core/utils/currency_denoms.dart';
 import '../../widgets/app_ui.dart';
 import '../../widgets/denom_validator_dialog.dart';
@@ -135,7 +136,7 @@ TxPolicy policyOfTx(Transaction tx) {
 /// منطق إجراءات الحركات (تسليم/إلغاء/تراجع/تعديل/طباعة) مشترك بين
 /// صفحة سجل الحركات ونتائج البحث في الصفحة الرئيسية — نفس المنطق حرفياً
 /// في مكان واحد حتى لا يتفرّع.
-mixin TxActions on State<StatefulWidget> {
+mixin TxActions<T extends StatefulWidget> on State<T> {
   AppDatabase get txDb;
   User get txUser;
   Map<int, Currency> get txCurrencies;

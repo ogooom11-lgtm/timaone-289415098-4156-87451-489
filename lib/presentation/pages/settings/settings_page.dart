@@ -448,6 +448,8 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   // --- Admin actions: Offices Management ---
+  // الدالتان محفوظتان لإعادة تفعيل إدارة المكاتب لاحقاً.
+  // ignore: unused_element
   Future<void> _addNewOfficeByAdmin() async {
     final controller = TextEditingController();
     final formKey = GlobalKey<FormState>();
@@ -503,6 +505,7 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
+  // ignore: unused_element
   Future<void> _deleteOfficeByAdmin(String officeName) async {
     final confirmed = await showDialog<bool>(
       context: context,
@@ -1172,7 +1175,7 @@ class _SettingsPageState extends State<SettingsPage> {
       const SizedBox(height: 14),
       _sectionHeader(
         context,
-        Icons.savings_rounded,
+        Icons.trending_down_rounded,
         'حد الرصيد الأدنى',
         'ينبّهك عندما ينزل الرصيد تحت الحد لكل عملة — 0 يعني الإيقاف',
       ),
@@ -1430,79 +1433,16 @@ class _SettingsPageState extends State<SettingsPage> {
         'المكاتب والفروع',
         'إضافة وحذف مكاتب العمل',
       ),
-      // إدارة المكاتب معطّلة حالياً بقرار سابق — الكود محفوظ كما هو.
-      if (false)
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(8.0),
-            child: ExpansionTile(
-              leading: const Icon(
-                Icons.storefront,
-                color: AppColors.brandGold,
-              ),
-              title: const Text(
-                "إدارة فروع ومكاتب العمل (Admins)",
-                style: TextStyle(fontWeight: FontWeight.bold),
-              ),
-              trailing: IconButton(
-                tooltip: "إضافة مكتب جديد في سوريا",
-                onPressed: _addNewOfficeByAdmin,
-                icon: const Icon(
-                  Icons.add_business,
-                  color: AppColors.brandGreen,
-                  size: 28,
-                ),
-              ),
-              children: [
-                FutureBuilder<List<String>>(
-                  future: widget.db.getOfficeNames(),
-                  builder: (context, snapshot) {
-                    final offices = snapshot.data ?? [];
-                    if (!snapshot.hasData) {
-                      return const Padding(
-                        padding: EdgeInsets.all(16),
-                        child: CircularProgressIndicator(),
-                      );
-                    }
-                    return Column(
-                      children: offices
-                          .map(
-                            (officeName) => ListTile(
-                              leading: const Icon(
-                                Icons.location_city,
-                                color: AppColors.brandGreen,
-                              ),
-                              title: Text(officeName),
-                              trailing: offices.length <= 1
-                                  ? null
-                                  : IconButton(
-                                      icon: const Icon(
-                                        Icons.delete,
-                                        color: AppColors.error,
-                                      ),
-                                      onPressed: () =>
-                                          _deleteOfficeByAdmin(officeName),
-                                    ),
-                            ),
-                          )
-                          .toList(),
-                    );
-                  },
-                ),
-              ],
-            ),
-          ),
-        )
-      else
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Text(
-              'إدارة المكاتب معطّلة حالياً.',
-              style: TextStyle(color: AppUi.textSecondary(context)),
-            ),
+      // إدارة المكاتب معطّلة حالياً بقرار سابق — دوالها محفوظة في الأعلى.
+      Card(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Text(
+            'إدارة المكاتب معطّلة حالياً.',
+            style: TextStyle(color: AppUi.textSecondary(context)),
           ),
         ),
+      ),
     ];
   }
 

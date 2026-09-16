@@ -313,6 +313,7 @@ class _OfficeSetupPageState extends State<OfficeSetupPage> {
     }
   }
 
+  // ignore: unused_element
   Future<void> _skipSetup() async {
     final ok = await showDialog<bool>(
       context: context,

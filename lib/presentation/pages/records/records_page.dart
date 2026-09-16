@@ -20,7 +20,7 @@ class RecordsPage extends StatefulWidget {
   State<RecordsPage> createState() => _RecordsPageState();
 }
 
-class _RecordsPageState extends State<RecordsPage> with TxActions {
+class _RecordsPageState extends State<RecordsPage> with TxActions<RecordsPage> {
   @override
   AppDatabase get txDb => widget.db;
   @override

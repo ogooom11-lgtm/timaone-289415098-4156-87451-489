@@ -371,6 +371,7 @@ class _SidebarTile extends StatefulWidget {
     required this.selected,
     required this.onTap,
     this.collapsed = false,
+    // ignore: unused_element_parameter
     this.danger = false,
   });
 
