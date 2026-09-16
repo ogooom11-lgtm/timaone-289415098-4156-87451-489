@@ -58,6 +58,9 @@ class _ReconciliationPageState extends State<ReconciliationPage> {
   String _search = '';
   bool _onlyUnmarked = false;
 
+  /// ترتيب الحركات: dateNew|dateOld|amountHigh|amountLow|name|status
+  String _txSort = 'dateNew';
+
   // ---- التقسيم ----
   double _split = 0.55;
 
@@ -198,6 +201,60 @@ class _ReconciliationPageState extends State<ReconciliationPage> {
       _pdfMarks.clear();
     });
     _toast('تم مسح كل العلامات', true);
+  }
+
+  String _nameOf(Transaction t) =>
+      (t.beneficiary?.trim().isNotEmpty == true) ? t.beneficiary!.trim() : t.type;
+
+  /// نسخ أسماء الحركات (ضمن المعروض حالياً): matched | notMatched | all.
+  Future<void> _copyNames(String which, bool withAmounts) async {
+    final names = <String>[];
+    for (final t in _filteredTx()) {
+      final s = _txState[t.id] ?? MatchState.none;
+      if (which == 'matched' && s != MatchState.matched) continue;
+      if (which == 'notMatched' && s != MatchState.notMatched) continue;
+      final name = _nameOf(t);
+      names.add(
+        withAmounts ? '$name — ${_fmt(t.amount)} ${_code(t.currencyId)}' : name,
+      );
+    }
+    if (names.isEmpty) {
+      _toast('لا توجد أسماء للنسخ ضمن المعروض', false);
+      return;
+    }
+    await Clipboard.setData(ClipboardData(text: names.join('\n')));
+    if (!mounted) return;
+    _toast('تم نسخ ${names.length} اسم', true);
+  }
+
+  /// نسخ اسم حركة واحدة.
+  Future<void> _copySingleName(String name) async {
+    if (name.trim().isEmpty) {
+      _toast('لا يوجد اسم للنسخ', false);
+      return;
+    }
+    await Clipboard.setData(ClipboardData(text: name));
+    if (!mounted) return;
+    _toast('تم نسخ الاسم', true);
+  }
+
+  /// تعليم كل الحركات المعروضة حالياً بحالة واحدة (أو مسح علاماتها).
+  void _markVisible(MatchState s) {
+    setState(() {
+      for (final t in _filteredTx()) {
+        if (s == MatchState.none) {
+          _txState.remove(t.id);
+        } else {
+          _txState[t.id] = s;
+        }
+      }
+    });
+    _toast(
+      s == MatchState.none
+          ? 'تم مسح علامات الحركات المعروضة'
+          : 'تم تعليم الحركات المعروضة',
+      true,
+    );
   }
 
   // ---------------- النسخ المتقدم ----------------
@@ -374,10 +431,15 @@ class _ReconciliationPageState extends State<ReconciliationPage> {
                             currencies: _currencies,
                             search: _search,
                             onlyUnmarked: _onlyUnmarked,
+                            sortMode: _txSort,
+                            onSort: (v) => setState(() => _txSort = v),
                             onSearch: (v) => setState(() => _search = v),
                             onToggleUnmarked: (v) =>
                                 setState(() => _onlyUnmarked = v),
                             onMark: _markTx,
+                            onCopyNames: _copyNames,
+                            onCopyName: _copySingleName,
+                            onMarkVisible: _markVisible,
                             fmt: _fmt,
                           ),
                         ),
@@ -394,7 +456,7 @@ class _ReconciliationPageState extends State<ReconciliationPage> {
   }
 
   List<Transaction> _filteredTx() {
-    return _transactions.where((t) {
+    final list = _transactions.where((t) {
       if (_onlyUnmarked && _txState.containsKey(t.id)) return false;
       if (_search.trim().isEmpty) return true;
       final q = _search.trim().toLowerCase();
@@ -402,6 +464,28 @@ class _ReconciliationPageState extends State<ReconciliationPage> {
           t.type.toLowerCase().contains(q) ||
           t.amount.toString().contains(q);
     }).toList();
+
+    int statusRank(Transaction t) => switch (_txState[t.id] ?? MatchState.none) {
+          MatchState.notMatched => 0,
+          MatchState.none => 1,
+          MatchState.matched => 2,
+        };
+
+    switch (_txSort) {
+      case 'dateOld':
+        list.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      case 'amountHigh':
+        list.sort((a, b) => b.amount.compareTo(a.amount));
+      case 'amountLow':
+        list.sort((a, b) => a.amount.compareTo(b.amount));
+      case 'name':
+        list.sort((a, b) => _nameOf(a).compareTo(_nameOf(b)));
+      case 'status':
+        list.sort((a, b) => statusRank(a).compareTo(statusRank(b)));
+      default:
+        list.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    }
+    return list;
   }
 }
 
@@ -1021,9 +1105,14 @@ class _TxPanel extends StatelessWidget {
   final Map<int, Currency> currencies;
   final String search;
   final bool onlyUnmarked;
+  final String sortMode;
+  final ValueChanged<String> onSort;
   final ValueChanged<String> onSearch;
   final ValueChanged<bool> onToggleUnmarked;
   final void Function(int, MatchState) onMark;
+  final void Function(String, bool) onCopyNames;
+  final void Function(String) onCopyName;
+  final void Function(MatchState) onMarkVisible;
   final String Function(double) fmt;
 
   const _TxPanel({
@@ -1033,14 +1122,29 @@ class _TxPanel extends StatelessWidget {
     required this.currencies,
     required this.search,
     required this.onlyUnmarked,
+    required this.sortMode,
+    required this.onSort,
     required this.onSearch,
     required this.onToggleUnmarked,
     required this.onMark,
+    required this.onCopyNames,
+    required this.onCopyName,
+    required this.onMarkVisible,
     required this.fmt,
   });
 
+  static const _sortLabels = {
+    'dateNew': 'الأحدث أولاً',
+    'dateOld': 'الأقدم أولاً',
+    'amountHigh': 'الأعلى مبلغاً',
+    'amountLow': 'الأقل مبلغاً',
+    'name': 'حسب الاسم',
+    'status': 'حسب الحالة',
+  };
+
   @override
   Widget build(BuildContext context) {
+    final iconColor = AppUi.textSecondary(context);
     return Container(
       decoration: BoxDecoration(
         color: AppUi.surface(context),
@@ -1080,6 +1184,97 @@ class _TxPanel extends StatelessWidget {
                       value: onlyUnmarked,
                       onChanged: onToggleUnmarked,
                     ),
+                    // ترتيب.
+                    PopupMenuButton<String>(
+                      tooltip: 'فرز وترتيب',
+                      initialValue: sortMode,
+                      onSelected: onSort,
+                      padding: EdgeInsets.zero,
+                      icon: Icon(Icons.sort_rounded, size: 20, color: iconColor),
+                      itemBuilder: (context) => _sortLabels.entries
+                          .map(
+                            (e) => PopupMenuItem<String>(
+                              value: e.key,
+                              child: Text(e.value),
+                            ),
+                          )
+                          .toList(),
+                    ),
+                    // نسخ الأسماء.
+                    PopupMenuButton<String>(
+                      tooltip: 'نسخ الأسماء',
+                      padding: EdgeInsets.zero,
+                      icon:
+                          Icon(Icons.copy_all_rounded, size: 20, color: iconColor),
+                      onSelected: (v) {
+                        switch (v) {
+                          case 'matched':
+                            onCopyNames('matched', false);
+                          case 'notMatched':
+                            onCopyNames('notMatched', false);
+                          case 'all':
+                            onCopyNames('all', false);
+                          case 'matchedAmt':
+                            onCopyNames('matched', true);
+                          case 'notMatchedAmt':
+                            onCopyNames('notMatched', true);
+                        }
+                      },
+                      itemBuilder: (context) => const [
+                        PopupMenuItem(
+                          value: 'matched',
+                          child: Text('نسخ الأسماء المطابقة'),
+                        ),
+                        PopupMenuItem(
+                          value: 'notMatched',
+                          child: Text('نسخ الأسماء غير المطابقة'),
+                        ),
+                        PopupMenuItem(
+                          value: 'all',
+                          child: Text('نسخ كل الأسماء'),
+                        ),
+                        PopupMenuDivider(),
+                        PopupMenuItem(
+                          value: 'matchedAmt',
+                          child: Text('المطابقة + المبالغ'),
+                        ),
+                        PopupMenuItem(
+                          value: 'notMatchedAmt',
+                          child: Text('غير المطابقة + المبالغ'),
+                        ),
+                      ],
+                    ),
+                    // تعليم جماعي.
+                    PopupMenuButton<String>(
+                      tooltip: 'تعليم جماعي',
+                      padding: EdgeInsets.zero,
+                      icon:
+                          Icon(Icons.done_all_rounded, size: 20, color: iconColor),
+                      onSelected: (v) {
+                        switch (v) {
+                          case 'matched':
+                            onMarkVisible(MatchState.matched);
+                          case 'notMatched':
+                            onMarkVisible(MatchState.notMatched);
+                          case 'clear':
+                            onMarkVisible(MatchState.none);
+                        }
+                      },
+                      itemBuilder: (context) => const [
+                        PopupMenuItem(
+                          value: 'matched',
+                          child: Text('تعليم المعروض كمطابق'),
+                        ),
+                        PopupMenuItem(
+                          value: 'notMatched',
+                          child: Text('تعليم المعروض كغير مطابق'),
+                        ),
+                        PopupMenuItem(
+                          value: 'clear',
+                          child: Text('مسح علامات المعروض'),
+                        ),
+                      ],
+                    ),
                   ],
                 ),
                 const SizedBox(height: 8),
@@ -1117,6 +1312,7 @@ class _TxPanel extends StatelessWidget {
                             code: currencies[tx.currencyId]?.code ?? '',
                             state: states[tx.id] ?? MatchState.none,
                             onMark: onMark,
+                            onCopyName: onCopyName,
                             fmt: fmt,
                           );
                         },
@@ -1189,6 +1385,7 @@ class _TxRow extends StatelessWidget {
   final String code;
   final MatchState state;
   final void Function(int, MatchState) onMark;
+  final void Function(String) onCopyName;
   final String Function(double) fmt;
 
   const _TxRow({
@@ -1196,6 +1393,7 @@ class _TxRow extends StatelessWidget {
     required this.code,
     required this.state,
     required this.onMark,
+    required this.onCopyName,
     required this.fmt,
   });
 
@@ -1310,7 +1508,28 @@ class _TxRow extends StatelessWidget {
                   color: accent,
                 ),
               ),
-              const SizedBox(width: 6),
+              const SizedBox(width: 4),
+              // نسخ اسم هذه الحركة.
+              InkWell(
+                onTap: () => onCopyName(
+                  (tx.beneficiary?.trim().isNotEmpty == true)
+                      ? tx.beneficiary!.trim()
+                      : tx.type,
+                ),
+                borderRadius: BorderRadius.circular(6),
+                child: Tooltip(
+                  message: 'نسخ الاسم',
+                  child: Padding(
+                    padding: const EdgeInsets.all(4),
+                    child: Icon(
+                      Icons.copy_rounded,
+                      size: 15,
+                      color: AppUi.textSecondary(context),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 2),
               Icon(
                 state == MatchState.matched
                     ? Icons.check_circle_rounded
