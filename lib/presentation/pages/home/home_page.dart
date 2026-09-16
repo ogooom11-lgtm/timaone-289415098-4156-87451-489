@@ -2,7 +2,6 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:intl/intl.dart' hide TextDirection;
 
 import '../../../core/services/telegram_notifier.dart';
 import '../../../core/storage/app_database.dart';
@@ -11,6 +10,8 @@ import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/utils/cashbox_balance.dart';
 import '../../../core/utils/currency_denoms.dart';
+import '../records/transaction_row.dart';
+import '../records/tx_shared.dart';
 import '../../shell/shell_scope.dart';
 import '../../shell/windows_sidebar.dart';
 import '../../widgets/app_ui.dart';
@@ -777,7 +778,7 @@ class DashboardPage extends StatefulWidget {
   State<DashboardPage> createState() => _DashboardPageState();
 }
 
-class _DashboardPageState extends State<DashboardPage> {
+class _DashboardPageState extends State<DashboardPage> with TxActions {
   /// مفاتيح التنبيهات التي سبق أن رنّ لها الصوت، حتى لا يتكرّر
   /// الرنين مع كل إعادة بناء أو تحديث للوحة.
   final Set<String> _announced = {};
@@ -790,6 +791,22 @@ class _DashboardPageState extends State<DashboardPage> {
   String _typeFilter = 'all';
   String _statusFilter = 'all';
   int _visibleCount = 20;
+
+  /// خرائط العمل لإجراءات الحركات المشتركة (نفس منطق سجل الحركات).
+  Map<int, Currency> _currencies = {};
+  final Set<int> _expandedIds = {};
+
+  @override
+  AppDatabase get txDb => widget.db;
+  @override
+  User get txUser => widget.user;
+  @override
+  Map<int, Currency> get txCurrencies => _currencies;
+  @override
+  Future<void> refreshTxData() async {
+    // إعادة بناء اللوحة تعيد جلب بيانات FutureBuilder تلقائياً.
+    if (mounted) setState(() {});
+  }
 
   bool get _searchActive =>
       _query.trim().isNotEmpty ||
@@ -908,6 +925,102 @@ class _DashboardPageState extends State<DashboardPage> {
         t.amount.toString().contains(q);
   }
 
+  /// نتائج البحث — نفس بطاقة سجل الحركات تماماً بنفس الأزرار والمنطق
+  /// (تسليم/إلغاء/تراجع/تعديل/طباعة/سجل التعديلات) عبر TxActions.
+  Widget _buildSearchResults(
+    BuildContext context,
+    List<Transaction> visible,
+    int total,
+  ) {
+    return TimaPanel(
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          TimaSectionTitle(
+            icon: Icons.manage_search_rounded,
+            title: 'نتائج البحث',
+            subtitle: total == 0
+                ? 'لا نتائج مطابقة'
+                : 'معروض ${visible.length} من $total',
+            trailing: TextButton.icon(
+              onPressed: _clearSearch,
+              icon: const Icon(Icons.clear_all_rounded, size: 18),
+              label: const Text('مسح البحث'),
+            ),
+          ),
+          const SizedBox(height: 10),
+          if (total == 0)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 28),
+              child: Column(
+                children: [
+                  Icon(
+                    Icons.search_off_rounded,
+                    size: 32,
+                    color: AppUi.textSecondary(context),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'لا توجد حركات مطابقة لهذا البحث',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ],
+              ),
+            )
+          else ...[
+            for (var i = 0; i < visible.length; i++) _searchRow(visible[i], i),
+            if (total > visible.length) ...[
+              const SizedBox(height: 10),
+              Align(
+                alignment: AlignmentDirectional.center,
+                child: OutlinedButton.icon(
+                  onPressed: () => setState(() => _visibleCount += 20),
+                  icon: const Icon(Icons.expand_more_rounded),
+                  label: Text('عرض المزيد (معروض ${visible.length} من $total)'),
+                ),
+              ),
+            ],
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _searchRow(Transaction tx, int index) {
+    return TxStaggered(
+      index: index,
+      child: TransactionRow(
+        key: ValueKey('dash-tx-${tx.id}'),
+        transaction: tx,
+        policy: policyOfTx(tx),
+        kind: kindOfTx(tx.type),
+        icon: iconOfTx(kindOfTx(tx.type)),
+        tint: colorOfTx(kindOfTx(tx.type)),
+        currencyCode: txCurrencyCode,
+        currencyName: txCurrencyName,
+        formatAmount: formatTxAmount,
+        formatDate: formatTxDate,
+        expanded: _expandedIds.contains(tx.id),
+        busy: busyTxId == tx.id,
+        onToggle: () => setState(() {
+          if (_expandedIds.contains(tx.id)) {
+            _expandedIds.remove(tx.id);
+          } else {
+            _expandedIds.add(tx.id);
+          }
+        }),
+        onEdit: () => editTx(tx),
+        onCancel: () => cancelTx(tx),
+        onDeliver: () => deliverTx(tx),
+        onRevertCancel: () => revertCancellation(tx),
+        onRevertDelivery: () => revertDelivery(tx),
+        onPrint: () => printTxReceipt(tx),
+        loadEdits: () => db.getEditsForTransaction(tx.id),
+      ),
+    );
+  }
+
   AppDatabase get db => widget.db;
   User get user => widget.user;
 
@@ -936,6 +1049,7 @@ class _DashboardPageState extends State<DashboardPage> {
         future: Future.wait<Object>([
           db.getAllTransactions(),
           CashboxBalanceCalculator.calculate(db),
+          db.getAllCurrencies(),
         ]),
         builder: (context, snapshot) {
           // hasData بدل connectionState: التحديث التلقائي يعيد الجلب
@@ -951,6 +1065,10 @@ class _DashboardPageState extends State<DashboardPage> {
           final cash = data != null && data.length > 1
               ? data[1] as Map<int, CurrencyCashSummary>
               : <int, CurrencyCashSummary>{};
+          final currencies = data != null && data.length > 2
+              ? data[2] as List<Currency>
+              : <Currency>[];
+          _currencies = {for (final c in currencies) c.id: c};
 
           final pendingDelivery = transactions
               .where(
@@ -982,7 +1100,7 @@ class _DashboardPageState extends State<DashboardPage> {
 
           // خرائط رموز العملات للبحث + نتائج البحث الحالية.
           final currencyCodes = <int, String>{
-            for (final s in cash.values) s.currency.id: s.currency.code,
+            for (final c in _currencies.values) c.id: c.code,
           };
           final searchResults = _searchActive
               ? _applySearch(transactions, currencyCodes)
@@ -1050,13 +1168,10 @@ class _DashboardPageState extends State<DashboardPage> {
 
                           // ---- نتائج البحث تحلّ محل اللوحة عند البحث ----
                           if (_searchActive) ...[
-                            _SearchResultsSection(
-                              visible: visibleResults,
-                              total: searchResults.length,
-                              codes: currencyCodes,
-                              onMore: () =>
-                                  setState(() => _visibleCount += 20),
-                              onClear: _clearSearch,
+                            _buildSearchResults(
+                              context,
+                              visibleResults,
+                              searchResults.length,
                             ),
                           ] else ...[
                           // ---- التنبيهات: أعلى الصفحة لأنها الأهم ----
@@ -1316,338 +1431,6 @@ class _SearchPanel extends StatelessWidget {
             ],
           ),
         ],
-      ),
-    );
-  }
-}
-
-/// نتائج البحث + زر «عرض المزيد» التدريجي.
-class _SearchResultsSection extends StatelessWidget {
-  final List<Transaction> visible;
-  final int total;
-  final Map<int, String> codes;
-  final VoidCallback onMore;
-  final VoidCallback onClear;
-
-  const _SearchResultsSection({
-    required this.visible,
-    required this.total,
-    required this.codes,
-    required this.onMore,
-    required this.onClear,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return TimaPanel(
-      padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          TimaSectionTitle(
-            icon: Icons.manage_search_rounded,
-            title: 'نتائج البحث',
-            subtitle: total == 0
-                ? 'لا نتائج مطابقة'
-                : 'معروض ${visible.length} من $total',
-            trailing: TextButton.icon(
-              onPressed: onClear,
-              icon: const Icon(Icons.clear_all_rounded, size: 18),
-              label: const Text('مسح البحث'),
-            ),
-          ),
-          const SizedBox(height: 8),
-          if (total == 0)
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 28),
-              child: Column(
-                children: [
-                  Icon(
-                    Icons.search_off_rounded,
-                    size: 32,
-                    color: AppUi.textSecondary(context),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    'لا توجد حركات مطابقة لهذا البحث',
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                ],
-              ),
-            )
-          else ...[
-            ...visible.map((t) => _SearchTxCard(tx: t, codes: codes)),
-            if (total > visible.length) ...[
-              const SizedBox(height: 10),
-              Align(
-                alignment: AlignmentDirectional.center,
-                child: OutlinedButton.icon(
-                  onPressed: onMore,
-                  icon: const Icon(Icons.expand_more_rounded),
-                  label: Text('عرض المزيد (معروض ${visible.length} من $total)'),
-                ),
-              ),
-            ],
-          ],
-        ],
-      ),
-    );
-  }
-}
-
-/// نتيجة واحدة قابلة للتوسيع مع تفاصيل كاملة ونسخ.
-class _SearchTxCard extends StatefulWidget {
-  final Transaction tx;
-  final Map<int, String> codes;
-
-  const _SearchTxCard({required this.tx, required this.codes});
-
-  @override
-  State<_SearchTxCard> createState() => _SearchTxCardState();
-}
-
-class _SearchTxCardState extends State<_SearchTxCard> {
-  bool _expanded = false;
-
-  String _label(String type) => switch (type) {
-        'حركة تسليم' => 'تسليم',
-        'حركة استلام' => 'استلام',
-        'حركة مرسلة' => 'مرسلة',
-        'حركة تسوية' => 'تسوية',
-        'حركة يوزر' => 'يوزر',
-        _ => type,
-      };
-
-  IconData _icon(String type) {
-    if (type.contains('تسليم')) return Icons.outbox_rounded;
-    if (type.contains('استلام')) return Icons.move_to_inbox_rounded;
-    if (type.contains('مرسلة')) return Icons.send_rounded;
-    if (type.contains('تسوية') || type.contains('صرف')) {
-      return Icons.currency_exchange_rounded;
-    }
-    return Icons.description_rounded;
-  }
-
-  Color _color(String type) {
-    if (type.contains('تسليم')) return AppColors.warning;
-    if (type.contains('استلام')) return AppColors.success;
-    if (type.contains('مرسلة')) return AppColors.ocean;
-    if (type.contains('تسوية') || type.contains('صرف')) {
-      return AppColors.brandGold;
-    }
-    return AppColors.neutral500;
-  }
-
-  static String _num(double v) =>
-      v == v.roundToDouble() ? v.toStringAsFixed(0) : v.toStringAsFixed(2);
-
-  Future<void> _copy() async {
-    final t = widget.tx;
-    final lines = <String>[
-      'نوع الحركة: ${t.type}',
-      'الاسم: ${t.beneficiary ?? '—'}',
-      'المبلغ: ${_num(t.amount)} ${widget.codes[t.currencyId] ?? ''}',
-      if (t.targetAmount != null)
-        'الهدف: ${_num(t.targetAmount!)} ${widget.codes[t.targetCurrencyId] ?? ''}',
-      if (t.exchangeRate != null)
-        'سعر الصرف: ${t.exchangeRate!} ${t.operation == null ? '' : '(${t.operation})'}',
-      if (t.fees != null && t.fees != 0)
-        'العمولة: ${_num(t.fees!)} ${widget.codes[t.feesCurrencyId] ?? ''}',
-      'الحالة: ${t.status}',
-      'الحركة: ${t.movementState}',
-      'المسجّل: ${t.createdByName}',
-      'التاريخ: ${DateFormat('yyyy-MM-dd HH:mm').format(t.createdAt.toLocal())}',
-      if ((t.note ?? '').isNotEmpty) 'الملاحظة: ${t.note}',
-    ];
-    await Clipboard.setData(ClipboardData(text: lines.join('\n')));
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('تم نسخ الحركة ✓'),
-        duration: Duration(seconds: 2),
-      ),
-    );
-  }
-
-  Widget _kv(BuildContext context, String k, String v) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 3),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          SizedBox(
-            width: 96,
-            child: Text(
-              k,
-              style: TextStyle(
-                fontSize: 12,
-                color: AppUi.textSecondary(context),
-              ),
-            ),
-          ),
-          Expanded(
-            child: Text(
-              v,
-              style: const TextStyle(
-                fontSize: 12.5,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final t = widget.tx;
-    final cancelled = t.movementState == 'ملغية' || t.status == 'الغاء';
-    final color = AppUi.tone(context, _color(t.type));
-    final title = (t.beneficiary?.trim().isNotEmpty ?? false)
-        ? t.beneficiary!.trim()
-        : t.type;
-
-    return Card(
-      margin: const EdgeInsets.symmetric(vertical: 4),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(AppDims.radiusLg),
-        onTap: () => setState(() => _expanded = !_expanded),
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-          child: Column(
-            children: [
-              Row(
-                children: [
-                  Container(
-                    width: 34,
-                    height: 34,
-                    decoration: BoxDecoration(
-                      color: color.withValues(alpha: 0.12),
-                      borderRadius: BorderRadius.circular(AppDims.radiusSm),
-                    ),
-                    child: Icon(_icon(t.type), size: 18, color: color),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          title,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            fontWeight: FontWeight.w800,
-                            fontSize: 13.5,
-                          ),
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          '${_label(t.type)} • ${DateFormat('yyyy-MM-dd').format(t.createdAt.toLocal())} • ${t.createdByName}',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 11.5,
-                            color: AppUi.textSecondary(context),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.end,
-                    children: [
-                      Text(
-                        '${_num(t.amount)} ${widget.codes[t.currencyId] ?? ''}',
-                        style: TextStyle(
-                          fontWeight: FontWeight.w800,
-                          fontSize: 13,
-                          color: cancelled
-                              ? AppUi.textSecondary(context)
-                              : null,
-                          decoration: cancelled
-                              ? TextDecoration.lineThrough
-                              : null,
-                        ),
-                      ),
-                      const SizedBox(height: 2),
-                      TimaStatusPill(
-                        label: cancelled ? 'ملغية' : t.status,
-                        color: cancelled
-                            ? AppColors.error
-                            : AppColors.neutral300,
-                      ),
-                    ],
-                  ),
-                  IconButton(
-                    tooltip: 'نسخ الحركة',
-                    onPressed: _copy,
-                    icon: const Icon(Icons.copy_rounded, size: 16),
-                  ),
-                  Icon(
-                    _expanded
-                        ? Icons.expand_less_rounded
-                        : Icons.expand_more_rounded,
-                    size: 20,
-                    color: AppUi.textSecondary(context),
-                  ),
-                ],
-              ),
-              if (_expanded) ...[
-                const Divider(height: 18),
-                Align(
-                  alignment: AlignmentDirectional.centerStart,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      _kv(context, 'نوع الحركة', t.type),
-                      _kv(context, 'الاسم', t.beneficiary ?? '—'),
-                      _kv(
-                        context,
-                        'المبلغ',
-                        '${_num(t.amount)} ${widget.codes[t.currencyId] ?? ''}',
-                      ),
-                      if (t.targetAmount != null)
-                        _kv(
-                          context,
-                          'الهدف',
-                          '${_num(t.targetAmount!)} ${widget.codes[t.targetCurrencyId] ?? ''}',
-                        ),
-                      if (t.exchangeRate != null)
-                        _kv(
-                          context,
-                          'سعر الصرف',
-                          '${t.exchangeRate!} ${t.operation == null ? '' : '(${t.operation})'}',
-                        ),
-                      if (t.fees != null && t.fees != 0)
-                        _kv(
-                          context,
-                          'العمولة',
-                          '${_num(t.fees!)} ${widget.codes[t.feesCurrencyId] ?? ''}',
-                        ),
-                      _kv(context, 'الحالة', t.status),
-                      _kv(context, 'الحركة', t.movementState),
-                      _kv(context, 'المسجّل', t.createdByName),
-                      _kv(
-                        context,
-                        'التاريخ',
-                        DateFormat('yyyy-MM-dd').format(t.createdAt.toLocal()),
-                      ),
-                      _kv(
-                        context,
-                        'الوقت',
-                        DateFormat('HH:mm').format(t.createdAt.toLocal()),
-                      ),
-                      if ((t.note ?? '').isNotEmpty)
-                        _kv(context, 'الملاحظة', t.note!),
-                    ],
-                  ),
-                ),
-              ],
-            ],
-          ),
-        ),
       ),
     );
   }
