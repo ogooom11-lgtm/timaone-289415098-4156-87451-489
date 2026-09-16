@@ -246,4 +246,75 @@ class DeviceSettings {
     data['receiptSettings'] = value;
     await _write(data);
   }
+
+  // --- إعدادات تنبيهات الصندوق ---
+  /// تفعيل/تعطيل تنبيهات الصندوق بالكامل.
+  static Future<bool> alertsEnabled() async {
+    final data = await _read();
+    final v = data['alertsEnabled'];
+    return v is bool ? v : true;
+  }
+
+  static Future<void> setAlertsEnabled(bool value) async {
+    final data = await _read();
+    data['alertsEnabled'] = value;
+    await _write(data);
+  }
+
+  /// التنبيه عند نفاد فئة من الفئات (وصول عددها إلى صفر).
+  static Future<bool> alertOnEmptyDenom() async {
+    final data = await _read();
+    final v = data['alertOnEmptyDenom'];
+    return v is bool ? v : true;
+  }
+
+  static Future<void> setAlertOnEmptyDenom(bool value) async {
+    final data = await _read();
+    data['alertOnEmptyDenom'] = value;
+    await _write(data);
+  }
+
+  /// إرسال التنبيهات إلى تيليغرام (يتطلب ربط البوت).
+  static Future<bool> alertViaTelegram() async {
+    final data = await _read();
+    final v = data['alertViaTelegram'];
+    return v is bool ? v : false;
+  }
+
+  static Future<void> setAlertViaTelegram(bool value) async {
+    final data = await _read();
+    data['alertViaTelegram'] = value;
+    await _write(data);
+  }
+
+  /// حدّ الرصيد المنخفض لعملة — 0 يعني غير مفعّل.
+  static Future<double> minBalanceFor(int currencyId) async {
+    final data = await _read();
+    final v = data['alert_min_balance_$currencyId'];
+    if (v is num) return v.toDouble();
+    return 0;
+  }
+
+  static Future<void> setMinBalanceFor(int currencyId, double value) async {
+    final data = await _read();
+    if (value <= 0) {
+      data.remove('alert_min_balance_$currencyId');
+    } else {
+      data['alert_min_balance_$currencyId'] = value;
+    }
+    await _write(data);
+  }
+
+  /// كل حدود الأرصدة المفعّلة: currencyId → الحد.
+  static Future<Map<int, double>> allMinBalances() async {
+    final data = await _read();
+    final out = <int, double>{};
+    data.forEach((k, v) {
+      if (k.startsWith('alert_min_balance_') && v is num) {
+        final id = int.tryParse(k.substring('alert_min_balance_'.length));
+        if (id != null) out[id] = v.toDouble();
+      }
+    });
+    return out;
+  }
 }

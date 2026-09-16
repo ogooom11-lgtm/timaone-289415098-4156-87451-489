@@ -37,12 +37,68 @@ class _SettingsPageState extends State<SettingsPage> {
   late Future<List<User>> _usersFuture;
   late User _currentUser;
 
+  /// القسم المختار في القائمة الجانبية.
+  int _sectionIndex = 0;
+
+  // ---- تفضيلات تنبيهات الصندوق ----
+  bool _alertsEnabled = true;
+  bool _alertEmptyDenom = true;
+  bool _alertViaTg = false;
+  final Map<int, TextEditingController> _minCtrl = {};
+
   @override
   void initState() {
     super.initState();
     _currentUser = widget.user;
     _currenciesFuture = widget.db.getAllCurrencies();
     _usersFuture = widget.db.getAllUsers();
+    _loadAlertPrefs();
+  }
+
+  @override
+  void dispose() {
+    for (final c in _minCtrl.values) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  Future<void> _loadAlertPrefs() async {
+    final enabled = await DeviceSettings.alertsEnabled();
+    final empty = await DeviceSettings.alertOnEmptyDenom();
+    final tg = await DeviceSettings.alertViaTelegram();
+    final mins = await DeviceSettings.allMinBalances();
+    if (!mounted) return;
+    setState(() {
+      _alertsEnabled = enabled;
+      _alertEmptyDenom = empty;
+      _alertViaTg = tg;
+      for (final c in _minCtrl.values) {
+        c.dispose();
+      }
+      _minCtrl.clear();
+      mins.forEach((id, v) {
+        _minCtrl[id] = TextEditingController(
+          text: v == v.roundToDouble() ? v.toStringAsFixed(0) : '$v',
+        );
+      });
+    });
+  }
+
+  Future<void> _saveMinBalance(int currencyId) async {
+    final raw = _minCtrl[currencyId]?.text.trim() ?? '';
+    final value = double.tryParse(raw) ?? 0;
+    await DeviceSettings.setMinBalanceFor(currencyId, value);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          value <= 0
+              ? 'تم إيقاف تنبيه الحد الأدنى لهذه العملة'
+              : 'تم حفظ الحد الأدنى: $value',
+        ),
+      ),
+    );
   }
 
   Future<void> _refreshData() async {
@@ -683,6 +739,18 @@ class _SettingsPageState extends State<SettingsPage> {
     ).showSnackBar(const SnackBar(content: Text('تم حفظ إعدادات تيليغرام')));
   }
 
+  static const List<(IconData, String)> _sections = [
+    (Icons.person_rounded, 'الحساب'),
+    (Icons.palette_rounded, 'المظهر'),
+    (Icons.notifications_active_rounded, 'الإشعارات والتنبيهات'),
+    (Icons.receipt_long_rounded, 'الإيصال والطباعة'),
+    (Icons.currency_exchange_rounded, 'العملات والفئات'),
+    (Icons.supervised_user_circle_rounded, 'حسابات الموظفين'),
+    (Icons.storefront_rounded, 'المكاتب والفروع'),
+    (Icons.settings_backup_restore_rounded, 'البيانات والنسخ'),
+    (Icons.info_rounded, 'حول التطبيق'),
+  ];
+
   @override
   Widget build(BuildContext context) {
     final isAdmin = _currentUser.role == "admin";
@@ -691,474 +759,838 @@ class _SettingsPageState extends State<SettingsPage> {
       backgroundColor: Colors.transparent,
       appBar: timaMaybeAppBar(context, title: "الإعدادات"),
       body: TimaPageBackground(
-        child: Scrollbar(
-          child: ListView(
-          padding: const EdgeInsets.symmetric(
-            horizontal: AppDims.pagePadding,
-            vertical: 16,
-          ),
-          children: [
-            TimaContentWidth(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final wide = constraints.maxWidth >= 820;
+
+            final header = Padding(
+              padding: const EdgeInsets.fromLTRB(
+                AppDims.pagePadding,
+                16,
+                AppDims.pagePadding,
+                0,
+              ),
+              child: TimaContentWidth(
+                child: TimaHeaderPanel(
+                  icon: Icons.settings_suggest_rounded,
+                  title: "إعدادات تيما",
+                  subtitle:
+                      "المستخدم: ${_currentUser.username} - الفرع: ${_currentUser.branch}",
+                  trailing: TimaStatusPill(
+                    label: isAdmin ? "مدير" : "مستخدم",
+                    color: isAdmin ? AppColors.brandGold : AppColors.ocean,
+                    icon: isAdmin
+                        ? Icons.admin_panel_settings_rounded
+                        : Icons.person_rounded,
+                  ),
+                ),
+              ),
+            );
+
+            final content = Expanded(
+              child: Scrollbar(
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 18,
+                    vertical: 16,
+                  ),
+                  child: TimaContentWidth(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: _sectionBody(context),
+                    ),
+                  ),
+                ),
+              ),
+            );
+
+            if (!wide) {
+              return Column(
                 children: [
-            TimaHeaderPanel(
-              icon: Icons.settings_suggest_rounded,
-              title: "إعدادات تيما",
-              subtitle:
-                  "المستخدم: ${_currentUser.username} - الفرع: ${_currentUser.branch}",
-              trailing: TimaStatusPill(
-                label: isAdmin ? "مدير" : "مستخدم",
-                color: isAdmin ? AppColors.brandGold : AppColors.ocean,
-                icon: isAdmin
-                    ? Icons.admin_panel_settings_rounded
-                    : Icons.person_rounded,
-              ),
-            ),
-            const SizedBox(height: 12),
-            // 1. Profile Card
-            Card(
-                            child: Padding(
-                padding: const EdgeInsets.all(8.0),
-                child: ExpansionTile(
-                  initiallyExpanded: true,
-                  leading: const Icon(Icons.person, color: AppColors.brandGold),
-                  title: const Text(
-                    "الملف الشخصي والفرع",
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  subtitle: Text("المستخدم الحالي: ${_currentUser.username}"),
-                  children: [
-                    ListTile(
-                      leading: const Icon(Icons.store, size: 20),
-                      title: const Text("مكتب العمل الحالي"),
-                      subtitle: Text(_currentUser.branch),
-                    ),
-                    ListTile(
-                      leading: const Icon(Icons.lock, size: 20),
-                      title: const Text("كلمة المرور"),
-                      subtitle: const Text("••••••••"),
-                      trailing: TextButton(
-                        onPressed: _changePassword,
-                        child: const Text("تغيير كلمة المرور"),
-                      ),
-                    ),
-                    ListTile(
-                      leading: const Icon(Icons.security, size: 20),
-                      title: const Text("نوع الحساب"),
-                      subtitle: const Text("موظف"),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 12),
+                  header,
+                  _navHorizontal(context),
+                  content,
+                ],
+              );
+            }
 
-            // 2. Theme Preferences Card
-            Card(
-                            child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Icon(
-                          Icons.palette_rounded,
-                          color: AppUi.accent(context),
-                        ),
-                        const SizedBox(width: 8),
-                        Text(
-                          "مظهر التطبيق",
-                          style: Theme.of(context).textTheme.titleMedium
-                              ?.copyWith(fontWeight: FontWeight.bold),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 12),
-                    SizedBox(
-                      width: double.infinity,
-                      child: SegmentedButton<ThemeMode>(
-                        segments: const [
-                          ButtonSegment(
-                            value: ThemeMode.system,
-                            icon: Icon(Icons.brightness_auto),
-                            label: Text("النظام"),
-                          ),
-                          ButtonSegment(
-                            value: ThemeMode.light,
-                            icon: Icon(Icons.light_mode),
-                            label: Text("فاتح"),
-                          ),
-                          ButtonSegment(
-                            value: ThemeMode.dark,
-                            icon: Icon(Icons.dark_mode),
-                            label: Text("داكن"),
-                          ),
-                        ],
-                        selected: {widget.themeMode},
-                        onSelectionChanged: (value) {
-                          widget.onThemeModeChanged(value.first);
-                        },
-                      ),
-                    ),
-                    const Divider(height: 26),
-                    SwitchListTile(
-                      contentPadding: EdgeInsets.zero,
-                      value: AppSound.enabled,
-                      onChanged: (v) async {
-                        await AppSound.setEnabled(v);
-                        if (v) AppSound.play(TimaSound.success);
-                        if (context.mounted) setState(() {});
-                      },
-                      secondary: Icon(
-                        AppSound.enabled
-                            ? Icons.volume_up_rounded
-                            : Icons.volume_off_rounded,
-                        color: AppUi.accent(context),
-                      ),
-                      title: const Text(
-                        'أصوات التطبيق',
-                        style: TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                      subtitle: const Text(
-                        'نغمة تنبيه عند ظهور تحذير الأرصدة، ونغمات النجاح والخطأ',
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 12),
-
-            // 2b. الطباعة والإيصالات — الطابعة المعتمدة والشعار والعدّاد
-            const ReceiptSettingsCard(),
-            const SizedBox(height: 12),
-
-            // 3. Currencies Card
-            Card(
-                            child: Padding(
-                padding: const EdgeInsets.all(8.0),
-                child: ExpansionTile(
-                  leading: const Icon(
-                    Icons.currency_exchange,
-                    color: AppColors.brandGold,
-                  ),
-                  title: const Text(
-                    "إدارة العملات وأسعار الصرف الفئات",
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  trailing: IconButton(
-                    tooltip: "إضافة عملة جديدة",
-                    onPressed: () => _addOrEditCurrency(),
-                    icon: const Icon(
-                      Icons.add_circle,
-                      color: AppColors.brandGreen,
-                      size: 28,
-                    ),
-                  ),
-                  children: [
-                    FutureBuilder<List<Currency>>(
-                      future: _currenciesFuture,
-                      builder: (context, snapshot) {
-                        final currencies = snapshot.data ?? [];
-                        if (!snapshot.hasData) {
-                          return const Padding(
-                            padding: EdgeInsets.all(16),
-                            child: CircularProgressIndicator(),
-                          );
-                        }
-                        if (currencies.isEmpty) {
-                          return const ListTile(
-                            title: Text("لا يوجد عملات مسجلة"),
-                          );
-                        }
-                        return Column(
-                          children: currencies.map((currency) {
-                            String cleanName =
-                                currency.name ?? "عملة غير معروفة";
-                            String cleanDenoms = "100, 50, 20, 10, 5, 1";
-                            if (currency.name != null &&
-                                currency.name!.contains('|')) {
-                              final parts = currency.name!.split('|');
-                              cleanName = parts.first;
-                              cleanDenoms = parts.last;
-                            }
-                            return ListTile(
-                              leading: CircleAvatar(
-                                backgroundColor: AppColors.brandGold
-                                    .withValues(alpha: 0.12),
-                                child: Text(
-                                  currency.code,
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 11,
-                                  ),
-                                ),
-                              ),
-                              title: Text(cleanName),
-                              subtitle: Text(
-                                "صرف: ${currency.rate} • الفئات: $cleanDenoms",
-                              ),
-                              trailing: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  IconButton(
-                                    icon: const Icon(
-                                      Icons.edit,
-                                      color: AppColors.ocean,
-                                    ),
-                                    onPressed: () =>
-                                        _addOrEditCurrency(currency: currency),
-                                  ),
-                                  IconButton(
-                                    icon: const Icon(
-                                      Icons.delete,
-                                      color: AppColors.error,
-                                    ),
-                                    onPressed: () => _deleteCurrency(currency),
-                                  ),
-                                ],
-                              ),
-                            );
-                          }).toList(),
-                        );
-                      },
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 12),
-
-            // 4. Users Management Card
-            Card(
-                            child: Padding(
-                padding: const EdgeInsets.all(8.0),
-                child: ExpansionTile(
-                  leading: const Icon(
-                    Icons.supervised_user_circle,
-                    color: AppColors.brandGold,
-                  ),
-                  title: const Text(
-                    "إدارة حسابات الموظفين",
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  trailing: IconButton(
-                    tooltip: "تسجيل مستخدم جديد",
-                    onPressed: _addNewUser,
-                    icon: const Icon(
-                      Icons.person_add,
-                      color: AppColors.brandGreen,
-                      size: 28,
-                    ),
-                  ),
-                  children: [
-                    FutureBuilder<List<User>>(
-                      future: _usersFuture,
-                      builder: (context, snapshot) {
-                        final users = snapshot.data ?? [];
-                        if (!snapshot.hasData) {
-                          return const Padding(
-                            padding: EdgeInsets.all(16),
-                            child: CircularProgressIndicator(),
-                          );
-                        }
-                        return Column(
-                          children: users
-                              .map(
-                                (usr) => ListTile(
-                                  leading: CircleAvatar(
-                                    backgroundColor: AppColors.ocean.withValues(alpha: 
-                                      0.12,
-                                    ),
-                                    child: const Icon(
-                                      Icons.person,
-                                      color: AppColors.ocean,
-                                    ),
-                                  ),
-                                  title: Text(usr.username),
-                                  subtitle: Text("المكتب: ${usr.branch}"),
-                                  trailing: usr.id == _currentUser.id
-                                      ? const Chip(label: Text("أنت"))
-                                      : IconButton(
-                                          icon: const Icon(
-                                            Icons.delete,
-                                            color: AppColors.error,
-                                          ),
-                                          onPressed: () => _deleteUser(usr),
-                                        ),
-                                ),
-                              )
-                              .toList(),
-                        );
-                      },
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 12),
-
-            // 5. Admin Only: Offices/Branches Management Card
-            if (false)
-              Card(
-                                child: Padding(
-                  padding: const EdgeInsets.all(8.0),
-                  child: ExpansionTile(
-                    leading: const Icon(
-                      Icons.storefront,
-                      color: AppColors.brandGold,
-                    ),
-                    title: const Text(
-                      "إدارة فروع ومكاتب العمل (Admins)",
-                      style: TextStyle(fontWeight: FontWeight.bold),
-                    ),
-                    trailing: IconButton(
-                      tooltip: "إضافة مكتب جديد في سوريا",
-                      onPressed: _addNewOfficeByAdmin,
-                      icon: const Icon(
-                        Icons.add_business,
-                        color: AppColors.brandGreen,
-                        size: 28,
-                      ),
-                    ),
+            return Column(
+              children: [
+                header,
+                Expanded(
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      FutureBuilder<List<String>>(
-                        future: widget.db.getOfficeNames(),
-                        builder: (context, snapshot) {
-                          final offices = snapshot.data ?? [];
-                          if (!snapshot.hasData) {
-                            return const Padding(
-                              padding: EdgeInsets.all(16),
-                              child: CircularProgressIndicator(),
-                            );
-                          }
-                          return Column(
-                            children: offices
-                                .map(
-                                  (officeName) => ListTile(
-                                    leading: const Icon(
-                                      Icons.location_city,
-                                      color: AppColors.brandGreen,
-                                    ),
-                                    title: Text(officeName),
-                                    trailing: offices.length <= 1
-                                        ? null
-                                        : IconButton(
-                                            icon: const Icon(
-                                              Icons.delete,
-                                              color: AppColors.error,
-                                            ),
-                                            onPressed: () =>
-                                                _deleteOfficeByAdmin(
-                                                  officeName,
-                                                ),
-                                          ),
-                                  ),
-                                )
-                                .toList(),
-                          );
-                        },
+                      SizedBox(
+                        width: 248,
+                        child: Padding(
+                          padding: const EdgeInsets.only(top: 14),
+                          child: ListView(
+                            padding: const EdgeInsets.only(bottom: 16),
+                            children: [
+                              for (var i = 0; i < _sections.length; i++)
+                                _navItem(context, i),
+                            ],
+                          ),
+                        ),
                       ),
+                      VerticalDivider(width: 1, color: AppUi.border(context)),
+                      content,
                     ],
                   ),
                 ),
-              ),
-            if (isAdmin) const SizedBox(height: 12),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
 
-            // 6. Maintenance / Danger Zone Card
-            Card(
-                            child: Padding(
-                padding: const EdgeInsets.all(8.0),
-                child: ExpansionTile(
-                  leading: const Icon(
-                    Icons.settings_suggest,
-                    color: AppColors.brandGold,
-                  ),
-                  title: const Text(
-                    "الصيانة والنسخ الاحتياطي",
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  children: [
-                    ListTile(
-                      leading: const Icon(
-                        Icons.backup,
-                        color: AppColors.brandGreen,
-                      ),
-                      title: const Text("إنشاء نسخة احتياطية"),
-                      subtitle: const Text(
-                        "حفظ نسخة أمان من قاعدة البيانات محليًا",
-                      ),
-                      onTap: _backupDatabase,
-                    ),
-                    ListTile(
-                      leading: const Icon(
-                        Icons.send_rounded,
-                        color: AppColors.info,
-                      ),
-                      title: const Text('ربط بوت تيليغرام للنسخ الاحتياطي'),
-                      subtitle: const Text(
-                        'يرسل النسخة تلقائياً إلى البوت عند حفظها',
-                      ),
-                      onTap: _configureTelegram,
-                    ),
-                    ListTile(
-                      leading: const Icon(
-                        Icons.delete_forever,
-                        color: AppColors.error,
-                      ),
-                      title: const Text("إعادة تهيئة الحركات والأرصدة"),
-                      subtitle: const Text(
-                        "حذف الحركات والتعديلات وتصفير فئات الصناديق (يبقي العملات والحسابات)",
-                      ),
-                      onTap: _resetDatabase,
-                    ),
-                    ListTile(
-                      leading: const Icon(
-                        Icons.settings_backup_restore,
-                        color: AppColors.error,
-                      ),
-                      title: const Text("حذف البيانات بالكامل"),
-                      subtitle: const Text(
-                        "يعيد التطبيق من الصفر: الحركات والفئات والعملات والإعدادات (يبقي الحسابات)",
-                      ),
-                      onTap: _wipeAllData,
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 12),
+  // ---- قائمة الأقسام ----
 
-            // 7. About Developer/App Info Card
-            Card(
-              elevation: 0,
-              child: Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Column(
-                  children: [
-                    Text(
-                      "تطبيق تيما المالي v1.0.0",
-                      style: Theme.of(context).textTheme.titleMedium,
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      "نظام محاسبي ذكي لإدارة العملات، الصناديق، والحركات المالية المتقدمة محليًا بشكل تفاعلي وآمن في سوريا.",
-                      textAlign: TextAlign.center,
-                      style: Theme.of(context).textTheme.bodySmall,
-                    ),
-                  ],
+  Widget _navItem(BuildContext context, int i) {
+    final selected = i == _sectionIndex;
+    final (icon, label) = _sections[i];
+    final accent = AppUi.accent(context);
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+      child: Material(
+        color: selected ? accent.withValues(alpha: 0.12) : Colors.transparent,
+        borderRadius: BorderRadius.circular(AppDims.radiusSm),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(AppDims.radiusSm),
+          onTap: () => setState(() => _sectionIndex = i),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+            child: Row(
+              children: [
+                Icon(
+                  icon,
+                  size: 18,
+                  color: selected ? accent : AppUi.textSecondary(context),
                 ),
-              ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    label,
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: selected ? FontWeight.w800 : FontWeight.w600,
+                      color: selected ? accent : AppUi.textPrimary(context),
+                    ),
+                  ),
+                ),
+              ],
             ),
-                ],
-              ),
-            ),
-          ],
           ),
         ),
       ),
     );
+  }
+
+  Widget _navHorizontal(BuildContext context) {
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      padding: const EdgeInsets.symmetric(
+        horizontal: AppDims.pagePadding,
+        vertical: 10,
+      ),
+      child: Row(
+        children: [
+          for (var i = 0; i < _sections.length; i++) ...[
+            ChoiceChip(
+              avatar: Icon(_sections[i].$1, size: 16),
+              label: Text(_sections[i].$2),
+              visualDensity: VisualDensity.compact,
+              selected: i == _sectionIndex,
+              onSelected: (_) => setState(() => _sectionIndex = i),
+            ),
+            const SizedBox(width: 6),
+          ],
+        ],
+      ),
+    );
+  }
+
+  // ---- أجسام الأقسام ----
+
+  List<Widget> _sectionBody(BuildContext context) {
+    switch (_sectionIndex) {
+      case 1:
+        return _appearanceSection(context);
+      case 2:
+        return _alertsSection(context);
+      case 3:
+        return const [SizedBox(height: 4), ReceiptSettingsCard()];
+      case 4:
+        return _currenciesSection(context);
+      case 5:
+        return _usersSection(context);
+      case 6:
+        return _officesSection(context);
+      case 7:
+        return _dataSection(context);
+      case 8:
+        return _aboutSection(context);
+      default:
+        return _accountSection(context);
+    }
+  }
+
+  Widget _sectionHeader(
+    BuildContext context,
+    IconData icon,
+    String title,
+    String subtitle,
+  ) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Row(
+        children: [
+          Icon(icon, size: 20, color: AppUi.accent(context)),
+          const SizedBox(width: 8),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              Text(
+                subtitle,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: AppUi.textSecondary(context),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  List<Widget> _accountSection(BuildContext context) {
+    return [
+      _sectionHeader(context, Icons.person_rounded, 'الحساب', 'بياناتك وكلمة المرور'),
+      Card(
+        child: Column(
+          children: [
+            ListTile(
+              leading: const Icon(Icons.badge_rounded, size: 20),
+              title: const Text("اسم المستخدم"),
+              subtitle: Text(_currentUser.username),
+            ),
+            ListTile(
+              leading: const Icon(Icons.store, size: 20),
+              title: const Text("مكتب العمل الحالي"),
+              subtitle: Text(_currentUser.branch),
+            ),
+            ListTile(
+              leading: const Icon(Icons.lock, size: 20),
+              title: const Text("كلمة المرور"),
+              subtitle: const Text("••••••••"),
+              trailing: FilledButton.tonal(
+                onPressed: _changePassword,
+                child: const Text("تغيير كلمة المرور"),
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.security, size: 20),
+              title: const Text("نوع الحساب"),
+              subtitle: Text(
+                _currentUser.role == "admin" ? "مدير" : "موظف",
+              ),
+            ),
+          ],
+        ),
+      ),
+    ];
+  }
+
+  List<Widget> _appearanceSection(BuildContext context) {
+    return [
+      _sectionHeader(context, Icons.palette_rounded, 'المظهر', 'السمة والأصوات'),
+      Card(
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                "سمة التطبيق",
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 10),
+              SizedBox(
+                width: double.infinity,
+                child: SegmentedButton<ThemeMode>(
+                  segments: const [
+                    ButtonSegment(
+                      value: ThemeMode.system,
+                      icon: Icon(Icons.brightness_auto),
+                      label: Text("النظام"),
+                    ),
+                    ButtonSegment(
+                      value: ThemeMode.light,
+                      icon: Icon(Icons.light_mode),
+                      label: Text("فاتح"),
+                    ),
+                    ButtonSegment(
+                      value: ThemeMode.dark,
+                      icon: Icon(Icons.dark_mode),
+                      label: Text("داكن"),
+                    ),
+                  ],
+                  selected: {widget.themeMode},
+                  onSelectionChanged: (value) {
+                    widget.onThemeModeChanged(value.first);
+                  },
+                ),
+              ),
+              const Divider(height: 26),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                value: AppSound.enabled,
+                onChanged: (v) async {
+                  await AppSound.setEnabled(v);
+                  if (v) AppSound.play(TimaSound.success);
+                  if (context.mounted) setState(() {});
+                },
+                secondary: Icon(
+                  AppSound.enabled
+                      ? Icons.volume_up_rounded
+                      : Icons.volume_off_rounded,
+                  color: AppUi.accent(context),
+                ),
+                title: const Text(
+                  'أصوات التطبيق',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                subtitle: const Text(
+                  'نغمة تنبيه عند ظهور تحذير الأرصدة، ونغمات النجاح والخطأ',
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    ];
+  }
+
+  List<Widget> _alertsSection(BuildContext context) {
+    return [
+      _sectionHeader(
+        context,
+        Icons.notifications_active_rounded,
+        'الإشعارات والتنبيهات',
+        'تنبيهات الصندوق: الرصيد المنخفض ونفاد الفئات',
+      ),
+      Card(
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                value: _alertsEnabled,
+                onChanged: (v) async {
+                  await DeviceSettings.setAlertsEnabled(v);
+                  if (mounted) setState(() => _alertsEnabled = v);
+                },
+                secondary: Icon(
+                  _alertsEnabled
+                      ? Icons.notifications_active_rounded
+                      : Icons.notifications_off_rounded,
+                  color: AppUi.accent(context),
+                ),
+                title: const Text(
+                  'تفعيل تنبيهات الصندوق',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                subtitle: const Text(
+                  'فحص تلقائي كل 30 ثانية مع إشعار صوتي ورسالة وجرس في الأعلى',
+                ),
+              ),
+              const Divider(height: 20),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                value: _alertEmptyDenom,
+                onChanged: _alertsEnabled
+                    ? (v) async {
+                        await DeviceSettings.setAlertOnEmptyDenom(v);
+                        if (mounted) setState(() => _alertEmptyDenom = v);
+                      }
+                    : null,
+                secondary: const Icon(
+                  Icons.money_off_rounded,
+                  color: AppColors.warning,
+                ),
+                title: const Text(
+                  'تنبيه عند نفاد فئة',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                subtitle: const Text(
+                  'يذكّرك عندما تصل كمية فئة من الفئات إلى صفر في أي صندوق',
+                ),
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                value: _alertViaTg,
+                onChanged: _alertsEnabled
+                    ? (v) async {
+                        await DeviceSettings.setAlertViaTelegram(v);
+                        if (mounted) setState(() => _alertViaTg = v);
+                        if (v &&
+                            !await TelegramNotifier.isConfigured() &&
+                            mounted) {
+                          _configureTelegram();
+                        }
+                      }
+                    : null,
+                secondary: const Icon(
+                  Icons.send_rounded,
+                  color: AppColors.info,
+                ),
+                title: const Text(
+                  'إرسال التنبيهات إلى تيليغرام',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                subtitle: const Text(
+                  'يرسل التنبيه إلى البوت المرتبط — يتطلب ربط تيليغرام',
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+      const SizedBox(height: 14),
+      _sectionHeader(
+        context,
+        Icons.savings_rounded,
+        'حد الرصيد الأدنى',
+        'ينبّهك عندما ينزل الرصيد تحت الحد لكل عملة — 0 يعني الإيقاف',
+      ),
+      Card(
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: FutureBuilder<List<Currency>>(
+            future: _currenciesFuture,
+            builder: (context, snapshot) {
+              final currencies = snapshot.data ?? [];
+              if (!snapshot.hasData) {
+                return const Padding(
+                  padding: EdgeInsets.all(16),
+                  child: CircularProgressIndicator(),
+                );
+              }
+              if (currencies.isEmpty) {
+                return const Padding(
+                  padding: EdgeInsets.all(16),
+                  child: Text("لا يوجد عملات مسجلة"),
+                );
+              }
+              return Column(
+                children: currencies.map((c) {
+                  final ctrl = _minCtrl.putIfAbsent(
+                    c.id,
+                    () => TextEditingController(),
+                  );
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 6),
+                    child: Row(
+                      children: [
+                        CircleAvatar(
+                          radius: 16,
+                          backgroundColor: AppColors.brandGold.withValues(
+                            alpha: 0.12,
+                          ),
+                          child: Text(
+                            c.code,
+                            style: const TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 10,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: TextField(
+                            controller: ctrl,
+                            keyboardType:
+                                const TextInputType.numberWithOptions(
+                                  decimal: true,
+                                ),
+                            decoration: InputDecoration(
+                              isDense: true,
+                              labelText: 'الحد الأدنى ${c.code}',
+                              hintText: '0',
+                              helperText: 'اتركه 0 للإيقاف',
+                            ),
+                            onSubmitted: (_) => _saveMinBalance(c.id),
+                          ),
+                        ),
+                        IconButton(
+                          tooltip: 'حفظ الحد',
+                          onPressed: () => _saveMinBalance(c.id),
+                          icon: const Icon(
+                            Icons.save_rounded,
+                            color: AppColors.success,
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                }).toList(),
+              );
+            },
+          ),
+        ),
+      ),
+    ];
+  }
+
+  List<Widget> _currenciesSection(BuildContext context) {
+    return [
+      _sectionHeader(
+        context,
+        Icons.currency_exchange_rounded,
+        'العملات والفئات',
+        'إضافة وتعديل وحذف العملات وفئاتها الورقية',
+      ),
+      Card(
+        child: Column(
+          children: [
+            ListTile(
+              leading: const Icon(
+                Icons.add_circle,
+                color: AppColors.brandGreen,
+              ),
+              title: const Text(
+                "إضافة عملة جديدة",
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+              subtitle: const Text("الرمز، الاسم، سعر الصرف، الفئات الورقية"),
+              onTap: () => _addOrEditCurrency(),
+            ),
+            const Divider(height: 1),
+            FutureBuilder<List<Currency>>(
+              future: _currenciesFuture,
+              builder: (context, snapshot) {
+                final currencies = snapshot.data ?? [];
+                if (!snapshot.hasData) {
+                  return const Padding(
+                    padding: EdgeInsets.all(16),
+                    child: CircularProgressIndicator(),
+                  );
+                }
+                if (currencies.isEmpty) {
+                  return const ListTile(
+                    title: Text("لا يوجد عملات مسجلة"),
+                  );
+                }
+                return Column(
+                  children: currencies.map((currency) {
+                    String cleanName = currency.name ?? "عملة غير معروفة";
+                    String cleanDenoms = "100, 50, 20, 10, 5, 1";
+                    if (currency.name != null &&
+                        currency.name!.contains('|')) {
+                      final parts = currency.name!.split('|');
+                      cleanName = parts.first;
+                      cleanDenoms = parts.last;
+                    }
+                    return ListTile(
+                      leading: CircleAvatar(
+                        backgroundColor: AppColors.brandGold.withValues(
+                          alpha: 0.12,
+                        ),
+                        child: Text(
+                          currency.code,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 11,
+                          ),
+                        ),
+                      ),
+                      title: Text(cleanName),
+                      subtitle: Text(
+                        "صرف: ${currency.rate} • الفئات: $cleanDenoms",
+                      ),
+                      trailing: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          IconButton(
+                            icon: const Icon(
+                              Icons.edit,
+                              color: AppColors.ocean,
+                            ),
+                            onPressed: () =>
+                                _addOrEditCurrency(currency: currency),
+                          ),
+                          IconButton(
+                            icon: const Icon(
+                              Icons.delete,
+                              color: AppColors.error,
+                            ),
+                            onPressed: () => _deleteCurrency(currency),
+                          ),
+                        ],
+                      ),
+                    );
+                  }).toList(),
+                );
+              },
+            ),
+          ],
+        ),
+      ),
+    ];
+  }
+
+  List<Widget> _usersSection(BuildContext context) {
+    return [
+      _sectionHeader(
+        context,
+        Icons.supervised_user_circle_rounded,
+        'حسابات الموظفين',
+        'تسجيل حسابات جديدة أو حذفها',
+      ),
+      Card(
+        child: Column(
+          children: [
+            ListTile(
+              leading: const Icon(
+                Icons.person_add,
+                color: AppColors.brandGreen,
+              ),
+              title: const Text(
+                "تسجيل مستخدم جديد",
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+              subtitle: const Text("يُنشأ الحساب ضمن مكتبك الحالي"),
+              onTap: _addNewUser,
+            ),
+            const Divider(height: 1),
+            FutureBuilder<List<User>>(
+              future: _usersFuture,
+              builder: (context, snapshot) {
+                final users = snapshot.data ?? [];
+                if (!snapshot.hasData) {
+                  return const Padding(
+                    padding: EdgeInsets.all(16),
+                    child: CircularProgressIndicator(),
+                  );
+                }
+                return Column(
+                  children: users
+                      .map(
+                        (usr) => ListTile(
+                          leading: CircleAvatar(
+                            backgroundColor: AppColors.ocean.withValues(
+                              alpha: 0.12,
+                            ),
+                            child: const Icon(
+                              Icons.person,
+                              color: AppColors.ocean,
+                            ),
+                          ),
+                          title: Text(usr.username),
+                          subtitle: Text("المكتب: ${usr.branch}"),
+                          trailing: usr.id == _currentUser.id
+                              ? const Chip(label: Text("أنت"))
+                              : IconButton(
+                                  icon: const Icon(
+                                    Icons.delete,
+                                    color: AppColors.error,
+                                  ),
+                                  onPressed: () => _deleteUser(usr),
+                                ),
+                        ),
+                      )
+                      .toList(),
+                );
+              },
+            ),
+          ],
+        ),
+      ),
+    ];
+  }
+
+  List<Widget> _officesSection(BuildContext context) {
+    return [
+      _sectionHeader(
+        context,
+        Icons.storefront_rounded,
+        'المكاتب والفروع',
+        'إضافة وحذف مكاتب العمل',
+      ),
+      // إدارة المكاتب معطّلة حالياً بقرار سابق — الكود محفوظ كما هو.
+      if (false)
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(8.0),
+            child: ExpansionTile(
+              leading: const Icon(
+                Icons.storefront,
+                color: AppColors.brandGold,
+              ),
+              title: const Text(
+                "إدارة فروع ومكاتب العمل (Admins)",
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+              trailing: IconButton(
+                tooltip: "إضافة مكتب جديد في سوريا",
+                onPressed: _addNewOfficeByAdmin,
+                icon: const Icon(
+                  Icons.add_business,
+                  color: AppColors.brandGreen,
+                  size: 28,
+                ),
+              ),
+              children: [
+                FutureBuilder<List<String>>(
+                  future: widget.db.getOfficeNames(),
+                  builder: (context, snapshot) {
+                    final offices = snapshot.data ?? [];
+                    if (!snapshot.hasData) {
+                      return const Padding(
+                        padding: EdgeInsets.all(16),
+                        child: CircularProgressIndicator(),
+                      );
+                    }
+                    return Column(
+                      children: offices
+                          .map(
+                            (officeName) => ListTile(
+                              leading: const Icon(
+                                Icons.location_city,
+                                color: AppColors.brandGreen,
+                              ),
+                              title: Text(officeName),
+                              trailing: offices.length <= 1
+                                  ? null
+                                  : IconButton(
+                                      icon: const Icon(
+                                        Icons.delete,
+                                        color: AppColors.error,
+                                      ),
+                                      onPressed: () =>
+                                          _deleteOfficeByAdmin(officeName),
+                                    ),
+                            ),
+                          )
+                          .toList(),
+                    );
+                  },
+                ),
+              ],
+            ),
+          ),
+        )
+      else
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Text(
+              'إدارة المكاتب معطّلة حالياً.',
+              style: TextStyle(color: AppUi.textSecondary(context)),
+            ),
+          ),
+        ),
+    ];
+  }
+
+  List<Widget> _dataSection(BuildContext context) {
+    return [
+      _sectionHeader(
+        context,
+        Icons.settings_backup_restore_rounded,
+        'البيانات والنسخ',
+        'نسخ احتياطي وتيليغرام وصيانة',
+      ),
+      Card(
+        child: Column(
+          children: [
+            ListTile(
+              leading: const Icon(
+                Icons.backup,
+                color: AppColors.brandGreen,
+              ),
+              title: const Text("إنشاء نسخة احتياطية"),
+              subtitle: const Text(
+                "حفظ نسخة أمان من قاعدة البيانات محليًا",
+              ),
+              onTap: _backupDatabase,
+            ),
+            ListTile(
+              leading: const Icon(
+                Icons.send_rounded,
+                color: AppColors.info,
+              ),
+              title: const Text('ربط بوت تيليغرام للنسخ الاحتياطي'),
+              subtitle: const Text(
+                'يرسل النسخة تلقائياً إلى البوت عند حفظها',
+              ),
+              onTap: _configureTelegram,
+            ),
+            const Divider(height: 1),
+            ListTile(
+              leading: const Icon(
+                Icons.delete_forever,
+                color: AppColors.error,
+              ),
+              title: const Text("إعادة تهيئة الحركات والأرصدة"),
+              subtitle: const Text(
+                "حذف الحركات والتعديلات وتصفير فئات الصناديق (يبقي العملات والحسابات)",
+              ),
+              onTap: _resetDatabase,
+            ),
+            ListTile(
+              leading: const Icon(
+                Icons.settings_backup_restore,
+                color: AppColors.error,
+              ),
+              title: const Text("حذف البيانات بالكامل"),
+              subtitle: const Text(
+                "يعيد التطبيق من الصفر: الحركات والفئات والعملات والحسابات وكل الإعدادات",
+              ),
+              onTap: _wipeAllData,
+            ),
+          ],
+        ),
+      ),
+    ];
+  }
+
+  List<Widget> _aboutSection(BuildContext context) {
+    return [
+      _sectionHeader(context, Icons.info_rounded, 'حول التطبيق', 'معلومات النسخة'),
+      Card(
+        elevation: 0,
+        child: Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Column(
+            children: [
+              Text(
+                "تطبيق تيما المالي v1.0.0",
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+              const SizedBox(height: 4),
+              Text(
+                "نظام محاسبي ذكي لإدارة العملات، الصناديق، والحركات المالية المتقدمة محليًا بشكل تفاعلي وآمن في سوريا.",
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ],
+          ),
+        ),
+      ),
+    ];
   }
 }
