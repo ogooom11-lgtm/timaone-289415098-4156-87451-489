@@ -1,5 +1,5 @@
 name: tima_one
-description: "A new Flutter project."
+description: "تيما المالي — نظام محاسبي لإدارة العملات والصناديق والحركات المالية لمكاتب الحوالات."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
@@ -54,6 +54,26 @@ dev_dependencies:
   flutter_lints: ^5.0.0
   drift_dev: ^2.17.0
   build_runner: ^2.4.7
+  # تغليف التطبيق بصيغة MSIX لرفعه على Microsoft Store
+  msix: ^3.16.8
+
+# ---------------------------------------------------------------------------
+# إعدادات حزمة المتجر (MSIX) — تُستخدم بالأمر: dart run msix:create --store
+#
+# مهم: بعد فتح حساب المطوّر وحجز اسم التطبيق في Partner Center، استبدل
+# قيمتَي identity_name و publisher_display_name بالقيم الحرفية الظاهرة هناك
+# (صفحة Identity في Partner Center) وإلا سيرفض المتجر الحزمة.
+# ---------------------------------------------------------------------------
+msix_config:
+  display_name: تيما المالي
+  publisher_display_name: REPLACE_WITH_PUBLISHER_DISPLAY_NAME
+  identity_name: REPLACE_WITH_IDENTITY_NAME
+  msix_version: 1.0.0.0
+  logo_path: assets/images/tima_logo.png
+  # التطبيق يحتاج الإنترنت فقط لإشعارات تيليغرام الاختيارية.
+  capabilities: internetClient
+  languages: ar
+  store: true
 
 
 
